@@ -1,238 +1,201 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Flame, RotateCcw, Target, Zap } from 'lucide-react';
-import { GazeState, TargetOrb } from '../../types';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { RotateCcw, Timer } from 'lucide-react';
 import { soundEngine } from '../../services/audio';
-import confetti from 'canvas-confetti';
+import { useGazeDwell, DwellTarget } from '../../hooks/useGazeDwell';
+import { viewingGeometry } from '../../services/viewingGeometry';
 
 interface TargetPopTaskProps {
-  gaze: GazeState | null;
+  dwellDurationMs: number;
 }
 
-const ORB_COLORS = [
-  { bg: 'bg-cyan-500/20', border: 'border-cyan-400', glow: '#06b6d4', text: 'text-cyan-300' },
-  { bg: 'bg-amber-500/20', border: 'border-amber-400', glow: '#f59e0b', text: 'text-amber-300' },
-  { bg: 'bg-emerald-500/20', border: 'border-emerald-400', glow: '#10b981', text: 'text-emerald-300' },
-  { bg: 'bg-purple-500/20', border: 'border-purple-400', glow: '#a855f7', text: 'text-purple-300' },
-  { bg: 'bg-rose-500/20', border: 'border-rose-400', glow: '#f43f5e', text: 'text-rose-300' },
+interface Bubble {
+  id: string;
+  xPercent: number;
+  yPercent: number;
+  radius: number;
+  hue: string;
+  spawnedAt: number;
+}
+
+const HUES = ['var(--color-sage-300)', 'var(--color-clay-300)', 'var(--color-sky-300)', 'var(--color-honey-300)'];
+
+/** Difficulty is expressed as target size, because that is what generalises. */
+const SIZES = [
+  { id: 'large', label: 'Large', radius: 62, assist: 55 },
+  { id: 'medium', label: 'Medium', radius: 44, assist: 35 },
+  { id: 'small', label: 'Small', radius: 30, assist: 18 },
 ];
 
-export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ gaze }) => {
-  const [orbs, setOrbs] = useState<TargetOrb[]>([]);
-  const [score, setScore] = useState(0);
-  const [combo, setCombo] = useState(1);
-  const [poppedCount, setPoppedCount] = useState(0);
-  const [highScore, setHighScore] = useState(0);
+/**
+ * Find-and-hold.
+ *
+ * A target appears; the client locates it and holds their gaze until it fills.
+ * The session summary reports time-to-acquire and how close the first fixation
+ * landed — both meaningful measures of saccadic accuracy — rather than a score.
+ * Target size is adjustable so the task can be graded, and the assistance
+ * radius shrinks with it, so "small" is genuinely harder rather than merely
+ * smaller-looking.
+ */
+export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ dwellDurationMs }) => {
+  const [sizeIndex, setSizeIndex] = useState(1);
+  const [bubbles, setBubbles] = useState<Bubble[]>([]);
+  const [completed, setCompleted] = useState(0);
+  const [acquireTimes, setAcquireTimes] = useState<number[]>([]);
+  const [firstDistances, setFirstDistances] = useState<number[]>([]);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [bounds, setBounds] = useState<DOMRect | null>(null);
 
-  // Spawn initial orbs
-  const spawnOrb = (): TargetOrb => {
-    return {
-      id: `orb-${Date.now()}-${Math.random()}`,
-      x: 15 + Math.random() * 70, // 15% - 85%
-      y: 20 + Math.random() * 65, // 20% - 85%
-      radius: 42,
-      color: ORB_COLORS[Math.floor(Math.random() * ORB_COLORS.length)].glow,
-      value: 100,
-      dwellProgress: 0,
-      isPopped: false,
-      pulsePhase: Math.random() * Math.PI * 2,
-    };
-  };
+  const size = SIZES[sizeIndex];
 
-  useEffect(() => {
-    // Initial 4 orbs
-    setOrbs([spawnOrb(), spawnOrb(), spawnOrb(), spawnOrb()]);
+  const measure = useCallback(() => {
+    if (containerRef.current) setBounds(containerRef.current.getBoundingClientRect());
   }, []);
 
-  // Main game tick
   useEffect(() => {
-    if (!gaze || !containerRef.current) return;
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [measure]);
 
-    const rect = containerRef.current.getBoundingClientRect();
-    const gx = gaze.screenX - rect.left;
-    const gy = gaze.screenY - rect.top;
+  const spawn = useCallback((): Bubble => ({
+    id: `bubble-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    xPercent: 12 + Math.random() * 76,
+    yPercent: 16 + Math.random() * 68,
+    radius: SIZES[sizeIndex].radius,
+    hue: HUES[Math.floor(Math.random() * HUES.length)],
+    spawnedAt: performance.now(),
+  }), [sizeIndex]);
 
-    if (gx < 0 || gx > rect.width || gy < 0 || gy > rect.height) return;
+  const reset = useCallback(() => {
+    setBubbles([spawn(), spawn(), spawn()]);
+    setCompleted(0);
+    setAcquireTimes([]);
+    setFirstDistances([]);
+  }, [spawn]);
 
-    const w = rect.width;
-    const h = rect.height;
+  useEffect(() => {
+    reset();
+  }, [reset]);
 
-    setOrbs(prevOrbs => {
-      let anyPopped = false;
-      const activeOrbs = prevOrbs.filter(o => !o.isPopped);
+  const targets: DwellTarget[] = useMemo(() => {
+    if (!bounds) return [];
+    return bubbles.map(b => ({
+      id: b.id,
+      x: bounds.left + (b.xPercent / 100) * bounds.width,
+      y: bounds.top + (b.yPercent / 100) * bounds.height,
+      radius: b.radius,
+    }));
+  }, [bubbles, bounds]);
 
-      // Find nearest orb to gaze within magnetic gravity radius (140px)
-      let nearestOrbId: string | null = null;
-      let minDistance = Infinity;
+  const dwell = useGazeDwell({
+    targets,
+    dwellMs: dwellDurationMs,
+    assistRadius: size.assist,
+    onSelect: (id, info) => {
+      const bubble = bubbles.find(b => b.id === id);
+      if (!bubble) return;
 
-      activeOrbs.forEach(orb => {
-        const orbPxX = (orb.x / 100) * w;
-        const orbPxY = (orb.y / 100) * h;
-        const dist = Math.hypot(gx - orbPxX, gy - orbPxY);
-        if (dist < 140 && dist < minDistance) {
-          minDistance = dist;
-          nearestOrbId = orb.id;
-        }
-      });
+      soundEngine.playBubblePop(420 + Math.random() * 180);
+      setCompleted(c => c + 1);
+      // Time from the target appearing to the dwell completing, minus the dwell
+      // itself, is the time actually spent finding and landing on it.
+      setAcquireTimes(times => [...times, Math.max(0, performance.now() - bubble.spawnedAt - info.dwellMs)]);
+      setFirstDistances(d => [...d, info.firstDistance]);
 
-      const updated = prevOrbs.map(orb => {
-        if (orb.isPopped) return orb;
+      setBubbles(current => [...current.filter(b => b.id !== id), spawn()]);
+    },
+  });
 
-        const orbPxX = (orb.x / 100) * w;
-        const orbPxY = (orb.y / 100) * h;
-        const dist = Math.hypot(gx - orbPxX, gy - orbPxY);
-
-        // Magnetic gravity well: If nearest within 140px or inside 80px radius
-        const isMagnetLocked = orb.id === nearestOrbId || dist < orb.radius + 35;
-
-        if (isMagnetLocked) {
-          // Charge dwell progress smoothly based on proximity
-          const chargeSpeed = dist < orb.radius ? 0.08 : 0.055;
-          const nextProgress = orb.dwellProgress + chargeSpeed;
-          if (nextProgress >= 1) {
-            anyPopped = true;
-            soundEngine.playBubblePop(440 + Math.min(combo * 40, 400));
-            return { ...orb, isPopped: true, dwellProgress: 1 };
-          }
-          return { ...orb, dwellProgress: nextProgress };
-        } else {
-          return { ...orb, dwellProgress: Math.max(0, orb.dwellProgress - 0.035) };
-        }
-      });
-
-      if (anyPopped) {
-        setScore(s => {
-          const newS = s + 100 * combo;
-          if (newS > highScore) setHighScore(newS);
-          return newS;
-        });
-        setCombo(c => Math.min(c + 1, 10));
-        setPoppedCount(p => p + 1);
-
-        // Respawn new orb
-        setTimeout(() => {
-          setOrbs(current => [
-            ...current.filter(o => !o.isPopped),
-            spawnOrb(),
-            spawnOrb(),
-          ]);
-        }, 150);
-      }
-
-      return updated;
-    });
-  }, [gaze, combo, highScore]);
-
-  const resetGame = () => {
-    setScore(0);
-    setCombo(1);
-    setPoppedCount(0);
-    setOrbs([spawnOrb(), spawnOrb(), spawnOrb(), spawnOrb()]);
-    soundEngine.playChime(350, 0.2);
-  };
+  const meanAcquire = acquireTimes.length > 0 ? acquireTimes.reduce((a, b) => a + b, 0) / acquireTimes.length : 0;
+  const meanLandingDeg =
+    firstDistances.length > 0
+      ? viewingGeometry.pixelsToDegrees(firstDistances.reduce((a, b) => a + b, 0) / firstDistances.length)
+      : 0;
 
   return (
-    <div
-      ref={containerRef}
-      id="target-pop-view"
-      className="relative w-full h-full flex flex-col bg-slate-950 select-none overflow-hidden"
-    >
-      {/* Header telemetry */}
-      <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-auto">
-        <div className="bg-slate-900/90 border border-slate-800/90 backdrop-blur-xl px-5 py-2.5 rounded-2xl shadow-xl flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <Target className="w-4 h-4 text-cyan-400" />
-            <h3 className="text-sm font-bold font-['Outfit'] text-white">
-              Gaze Focus & Dwell Burst
-            </h3>
+    <div ref={containerRef} className="absolute inset-0 overflow-hidden">
+      <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 surface rounded-full px-2 py-1.5">
+        {SIZES.map((s, i) => (
+          <button
+            key={s.id}
+            onClick={() => setSizeIndex(i)}
+            className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+              sizeIndex === i ? 'bg-sage-100 text-sage-700' : 'text-ink-soft hover:text-ink'
+            }`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {bubbles.map(bubble => {
+        const isActive = dwell.activeId === bubble.id;
+        const progress = isActive ? dwell.progress : 0;
+        return (
+          <div
+            key={bubble.id}
+            className="absolute -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${bubble.xPercent}%`, top: `${bubble.yPercent}%` }}
+          >
+            <svg width={bubble.radius * 2 + 16} height={bubble.radius * 2 + 16} className="overflow-visible">
+              <circle
+                cx={bubble.radius + 8}
+                cy={bubble.radius + 8}
+                r={bubble.radius}
+                fill={bubble.hue}
+                fillOpacity={isActive ? 0.5 : 0.3}
+                stroke={bubble.hue}
+                strokeWidth={2}
+              />
+              {progress > 0 && (
+                <circle
+                  cx={bubble.radius + 8}
+                  cy={bubble.radius + 8}
+                  r={bubble.radius + 6}
+                  fill="none"
+                  stroke="var(--color-sage-500)"
+                  strokeWidth={4}
+                  strokeLinecap="round"
+                  strokeDasharray={2 * Math.PI * (bubble.radius + 6)}
+                  strokeDashoffset={2 * Math.PI * (bubble.radius + 6) * (1 - progress)}
+                  transform={`rotate(-90 ${bubble.radius + 8} ${bubble.radius + 8})`}
+                  style={{ transition: 'stroke-dashoffset 60ms linear' }}
+                />
+              )}
+            </svg>
           </div>
+        );
+      })}
 
-          <div className="w-px h-4 bg-slate-800" />
-
-          <div className="flex items-center gap-3 text-xs font-mono">
-            <div>
-              <span className="text-slate-400">Score: </span>
-              <span className="text-amber-400 font-bold">{score}</span>
-            </div>
-            <div>
-              <span className="text-slate-400">Popped: </span>
-              <span className="text-emerald-300 font-bold">{poppedCount}</span>
-            </div>
-            {combo > 1 && (
-              <div className="flex items-center gap-1 text-purple-400 font-bold animate-pulse">
-                <Flame className="w-3.5 h-3.5" />
-                <span>{combo}x Multiplier</span>
-              </div>
-            )}
-          </div>
-        </div>
-
+      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 surface rounded-2xl px-5 py-3 flex items-center gap-6">
+        <Stat label="Completed" value={String(completed)} />
+        <Stat label="Time to find" value={completed > 0 ? `${(meanAcquire / 1000).toFixed(1)} s` : '—'} icon={Timer} />
+        <Stat
+          label="First landing"
+          value={completed > 0 ? `${meanLandingDeg.toFixed(1)}° off` : '—'}
+        />
         <button
-          id="reset-target-pop-btn"
-          onClick={resetGame}
-          className="p-2.5 bg-slate-900/90 border border-slate-800 rounded-xl text-slate-400 hover:text-white transition-colors cursor-pointer"
-          title="Restart Target Pop"
+          onClick={reset}
+          className="p-2 rounded-xl text-ink-faint hover:text-ink hover:bg-[var(--surface-sunken)] transition-colors"
+          aria-label="Start again"
         >
           <RotateCcw className="w-4 h-4" />
         </button>
       </div>
-
-      {/* Floating Target Orbs */}
-      <div className="relative flex-1 w-full h-full">
-        {orbs.map(orb => {
-          if (orb.isPopped) return null;
-
-          return (
-            <div
-              key={orb.id}
-              className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-transform duration-75"
-              style={{ left: `${orb.x}%`, top: `${orb.y}%` }}
-            >
-              <div className="relative flex items-center justify-center">
-                {/* Glow ring */}
-                <div
-                  className="absolute w-24 h-24 rounded-full blur-md opacity-40 animate-pulse"
-                  style={{ backgroundColor: orb.color }}
-                />
-
-                {/* Dwell Progress Ring */}
-                <svg className="w-20 h-20 -rotate-90">
-                  <circle
-                    cx={40}
-                    cy={40}
-                    r={32}
-                    stroke="rgba(255, 255, 255, 0.15)"
-                    strokeWidth={4}
-                    fill="transparent"
-                  />
-                  <circle
-                    cx={40}
-                    cy={40}
-                    r={32}
-                    stroke={orb.color}
-                    strokeWidth={4}
-                    fill="transparent"
-                    strokeDasharray={2 * Math.PI * 32}
-                    strokeDashoffset={(1 - orb.dwellProgress) * (2 * Math.PI * 32)}
-                    strokeLinecap="round"
-                  />
-                </svg>
-
-                {/* Orb Core */}
-                <div
-                  className="absolute w-14 h-14 rounded-full flex items-center justify-center backdrop-blur-md border border-white/20 shadow-lg"
-                  style={{
-                    backgroundColor: `${orb.color}33`,
-                    boxShadow: `0 0 16px ${orb.color}`,
-                  }}
-                >
-                  <Sparkles className="w-6 h-6 text-white" />
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 };
+
+const Stat: React.FC<{ label: string; value: string; icon?: React.ComponentType<{ className?: string }> }> = ({
+  label,
+  value,
+  icon: Icon,
+}) => (
+  <div className="text-center">
+    <p className="text-xs text-ink-faint flex items-center gap-1 justify-center">
+      {Icon && <Icon className="w-3 h-3" />}
+      {label}
+    </p>
+    <p className="text-lg font-semibold text-ink tabular-nums">{value}</p>
+  </div>
+);

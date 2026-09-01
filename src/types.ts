@@ -5,28 +5,52 @@ export interface Point2D {
   pressure?: number;
 }
 
-export interface EyeLandmarks {
-  irisLeft: { x: number; y: number; z: number };
-  irisRight: { x: number; y: number; z: number };
-  leftEyeCorners: { inner: Point2D; outer: Point2D };
-  rightEyeCorners: { inner: Point2D; outer: Point2D };
-  leftEyeUpperLower: { upper: Point2D; lower: Point2D };
-  rightEyeUpperLower: { upper: Point2D; lower: Point2D };
+export interface HeadPose {
+  /** Radians. Positive = turned toward the screen's right. */
+  yaw: number;
+  /** Radians. Positive = chin raised. */
+  pitch: number;
+  /** Radians. Positive = head tilted toward the screen's right. */
+  roll: number;
+  /** Face centre offset from the image centre, in normalised image units. */
+  translateX: number;
+  translateY: number;
+  /** Estimated eye-to-camera distance in cm, or null when not measurable. */
+  distanceCm: number | null;
+  /** Distance between the eye centres in normalised image units. */
+  interocularSpan: number;
 }
 
-export interface HeadPose {
-  pitch: number; // up/down
-  yaw: number;   // left/right
-  roll: number;  // tilt
+/** The scale-, roll- and foreshortening-invariant eye measurements we regress on. */
+export interface GazeFeatures {
+  gx: number;
+  gy: number;
+  leftGx: number | null;
+  leftGy: number | null;
+  rightGx: number | null;
+  rightGy: number | null;
+  /** 0 = closed, 1 = comfortably open. */
+  eyeOpenLeft: number;
+  eyeOpenRight: number;
+  isBlinkingLeft: boolean;
+  isBlinkingRight: boolean;
+  isBlinkingBoth: boolean;
+  /** How far the two eyes' independent estimates disagree. */
+  binocularDisagreement: number;
+  /** 0–1 estimate of how trustworthy this frame is. */
+  quality: number;
 }
+
+export type OcularEvent = 'fixation' | 'saccade' | 'blink' | 'lost';
 
 export interface GazeState {
   screenX: number;
   screenY: number;
-  normX: number; // 0 to 1
-  normY: number; // 0 to 1
-  rawX: number;
-  rawY: number;
+  normX: number;
+  normY: number;
+  /** The underlying eye measurement for this frame. */
+  gx: number;
+  gy: number;
   snappedX?: number;
   snappedY?: number;
   isSnapped?: boolean;
@@ -34,84 +58,184 @@ export interface GazeState {
   isBlinkingRight: boolean;
   isBlinkingBoth: boolean;
   blinkCount: number;
+  /** Classified by velocity (I-VT), not by a fixed pixel box. */
+  event: OcularEvent;
   isFixating: boolean;
+  /** Gaze velocity in degrees of visual angle per second. */
+  velocityDegPerSec: number;
+  /** Where the current fixation began, and how long it has lasted. */
+  fixationCentre?: Point2D;
+  fixationDurationMs: number;
+  /** 0–1. Reflects eye openness, binocular agreement and head pose. */
   confidence: number;
+  /** True while the estimate is being held through a blink rather than measured. */
+  isHeld: boolean;
   headPose: HeadPose;
   timestamp: number;
 }
 
 export interface CalibrationSample {
-  rawX: number;
-  rawY: number;
+  gx: number;
+  gy: number;
   headYaw: number;
   headPitch: number;
+  headTranslateX: number;
+  headTranslateY: number;
+  quality: number;
 }
 
 export interface CalibrationTarget {
   id: number;
   label: string;
-  xPercent: number; // 0 to 100%
-  yPercent: number; // 0 to 100%
+  xPercent: number;
+  yPercent: number;
   samples: CalibrationSample[];
   status: 'pending' | 'sampling' | 'completed';
 }
 
-export interface QuadraticCoefficients {
-  a: number[]; // [a0, a1, a2, a3, a4, a5] for X = a0 + a1*x + a2*y + a3*x^2 + a4*y^2 + a5*x*y
-  b: number[]; // [b0, b1, b2, b3, b4, b5] for Y = b0 + b1*x + b2*y + b3*x^2 + b4*y^2 + b5*x*y
+/** One anchor: a screen location plus the averaged eye measurement that produced it. */
+export interface CalibrationAnchor {
+  id: string;
+  /** Stored as a fraction of the viewport so a window resize does not invalidate it. */
+  xNorm: number;
+  yNorm: number;
+  gx: number;
+  gy: number;
+  headYaw: number;
+  headPitch: number;
+  headTranslateX: number;
+  headTranslateY: number;
+  /** Spread of the samples that produced this anchor, in feature units. */
+  dispersion: number;
+  sampleCount: number;
+  label?: string;
+  timestamp: number;
+}
+
+export interface RegressionModel {
+  /** Which feature set this model was fitted with; see featureDegreeForAnchorCount. */
+  degree: number;
+  /** Weights for the standardised design matrix, one set per output axis. */
+  weightsX: number[];
+  weightsY: number[];
+  featureMean: number[];
+  featureStd: number[];
+  /** Residuals at each anchor, used for the local correction term. */
+  residuals: Array<{ gx: number; gy: number; dx: number; dy: number }>;
+  /** Kernel width for the local correction, in feature units. */
+  kernelSigma: number;
+}
+
+export interface CalibrationQuality {
+  /** Mean absolute error at the calibration points themselves (leave-one-out). */
+  crossValidatedErrorPx: number;
+  crossValidatedErrorDeg: number;
+  anchorCount: number;
+  /** Whether the anchors actually span the screen, or cluster in one region. */
+  coverage: number;
+}
+
+export interface ValidationPointResult {
+  id: string;
+  xNorm: number;
+  yNorm: number;
+  /** Mean offset between the estimate and the true target, in px. */
+  errorPx: number;
+  errorDeg: number;
+  offsetX: number;
+  offsetY: number;
+  /** Sample-to-sample scatter, in px and degrees. */
+  precisionPx: number;
+  precisionDeg: number;
+  sampleCount: number;
+}
+
+export interface ValidationResult {
+  points: ValidationPointResult[];
+  accuracyPx: number;
+  accuracyDeg: number;
+  precisionPx: number;
+  precisionDeg: number;
+  /** Fraction of frames during validation that produced a usable estimate. */
+  trackingRatio: number;
+  distanceCm: number | null;
+  distanceWasMeasured: boolean;
+  timestamp: number;
+  grade: 'excellent' | 'good' | 'fair' | 'poor';
+}
+
+/** The head pose recorded at calibration time, used to detect later drift. */
+export interface CalibrationPosture {
+  yaw: number;
+  pitch: number;
+  roll: number;
+  translateX: number;
+  translateY: number;
+  interocularSpan: number;
+  distanceCm: number | null;
 }
 
 export interface CalibrationModel {
   isCalibrated: boolean;
-  isCenterCalibrated?: boolean;
   lastCalibratedAt?: number;
-  centerOffsetX?: number;
-  centerOffsetY?: number;
-  centerHeadYaw?: number;
-  centerHeadPitch?: number;
-  quadraticCoeffs?: QuadraticCoefficients;
-  affineMatrix?: {
-    a: number; b: number; c: number;
-    d: number; e: number; f: number;
-  };
-  offsetX: number;
-  offsetY: number;
-  scaleX: number;
-  scaleY: number;
-  gridOffsets?: { [key: number]: { dx: number; dy: number } };
+  regression?: RegressionModel;
+  quality?: CalibrationQuality;
+  posture?: CalibrationPosture;
+  validation?: ValidationResult;
+  /** Manual bias correction applied after the model, in normalised units. */
+  nudgeXNorm: number;
+  nudgeYNorm: number;
 }
 
-export type PenActivationMode = 'auto_stream' | 'blink_toggle' | 'dwell_trigger' | 'hold_space' | 'always_on';
-export type TrackingEngineMode = 'hybrid_gaze' | 'iris_only' | 'head_laser';
+export interface PostureDrift {
+  /** How far the head has moved sideways/vertically since calibration, in cm. */
+  lateralCm: number;
+  /** Change in distance from the screen since calibration, in cm. */
+  depthCm: number;
+  /** Change in head rotation since calibration, in degrees. */
+  rotationDeg: number;
+  /** 0–1, where 1 is exactly the calibrated posture. */
+  stability: number;
+  severity: 'good' | 'drifting' | 'recalibrate';
+}
+
+export type ActivationMode = 'dwell' | 'blink' | 'switch' | 'always_on';
+export type TrackingEngineMode = 'binocular' | 'left_eye' | 'right_eye' | 'head_pointer';
 export type DrawingToolMode = 'freehand' | 'straight_laser' | 'ortho_ruler' | 'shapes' | 'polyline';
 export type ShapeKind = 'rectangle' | 'circle' | 'triangle' | 'arrow';
+export type PenActivationMode = 'auto_stream' | 'blink_toggle' | 'dwell_trigger' | 'hold_space' | 'always_on';
 
 export interface TrackingSettings {
-  smoothingFactor: number;       // legacy fallback / speed scale
-  oneEuroMinCutoff: number;      // 1€ filter min cutoff in Hz (0.2 to 2.5)
-  oneEuroBeta: number;           // 1€ filter velocity coefficient (0.005 to 0.2)
-  saccadeThreshold: number;      // threshold to bypass smoothing on fast eye jump
-  sensitivityX: number;          // 0.5 to 3.0
-  sensitivityY: number;          // 0.5 to 3.0
-  deadzone: number;              // micro-jitter threshold (0 to 30px)
-  nudgeOffsetX?: number;         // real-time pixel offset nudge (-200 to +200)
-  nudgeOffsetY?: number;         // real-time pixel offset nudge (-200 to +200)
-  trackingEngineMode?: TrackingEngineMode; // Hybrid Gaze vs Pure Iris vs Head-Laser Pointer
-  magneticSnapAssist?: boolean;  // magnetic target gravity well assist
-  magneticSnapRadius?: number;   // magnetic radius in px (default 120)
-  snapToGrid: boolean;           // snap coordinate to grid when fixating
-  gridSnapSize: number;          // grid size in px (e.g. 20, 40, 60)
-  dwellDurationMs: number;       // time to trigger dwell click/action
+  /** 1€ filter parameters: lower cutoff = steadier, higher beta = quicker. */
+  oneEuroMinCutoff: number;
+  oneEuroBeta: number;
+  /** Velocity threshold separating fixations from saccades, in deg/s. */
+  saccadeVelocityThreshold: number;
+  /** Extra gain applied around the screen centre after mapping. */
+  sensitivityX: number;
+  sensitivityY: number;
+  deadzone: number;
+  nudgeOffsetX?: number;
+  nudgeOffsetY?: number;
+  trackingEngineMode?: TrackingEngineMode;
+  magneticSnapAssist?: boolean;
+  magneticSnapRadius?: number;
+  snapToGrid: boolean;
+  gridSnapSize: number;
+  dwellDurationMs: number;
   invertX: boolean;
   invertY: boolean;
-  useHeadCompensation: boolean;
-  useQuadraticMapping: boolean;  // 2nd-degree polynomial mapping toggle
+  /** Hold the last estimate through blinks instead of letting it jump. */
+  holdThroughBlinks: boolean;
+  /** Drop frames whose confidence falls below this threshold. */
+  minConfidence: number;
   penMode: PenActivationMode;
   audioEnabled: boolean;
   showWebcamPiP: boolean;
   showLandmarkMesh: boolean;
   showGazeTrail: boolean;
   showGazeReticle: boolean;
+  showPostureGuide: boolean;
   strokeColor: string;
   strokeGlowColor: string;
   strokeWidth: number;
@@ -127,13 +251,13 @@ export interface DrawingStroke {
   totalLength: number;
 }
 
-export type ActivityMode = 
-  | 'single_line'      // Primary requested feature: Draw a single continuous eye-tracked line
-  | 'constellation'    // Connect stars in sequence using single gaze stroke
-  | 'maze'             // Guide gaze through a labyrinth without touching bounds
-  | 'target_pop'       // Focus & dwell to burst celestial orbs
-  | 'quick_type'       // Gaze dwell on intuitive radial / grid letterboard
-  | 'reading_analysis';// Track reading fixations, regressions, WPM, and head movement
+export type ActivityMode =
+  | 'single_line'
+  | 'constellation'
+  | 'maze'
+  | 'target_pop'
+  | 'quick_type'
+  | 'reading_analysis';
 
 export interface ConstellationStar {
   id: number;
@@ -167,7 +291,7 @@ export interface TargetOrb {
   radius: number;
   color: string;
   value: number;
-  dwellProgress: number; // 0 to 1
+  dwellProgress: number;
   isPopped: boolean;
   pulsePhase: number;
 }

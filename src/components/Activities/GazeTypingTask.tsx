@@ -1,242 +1,207 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, Volume2, Trash2, Delete, Check, Sparkles } from 'lucide-react';
-import { GazeState } from '../../types';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CornerUpLeft, Delete, Trash2, Volume2 } from 'lucide-react';
 import { soundEngine } from '../../services/audio';
+import { DwellTarget, useGazeDwell } from '../../hooks/useGazeDwell';
 
 interface GazeTypingTaskProps {
-  gaze: GazeState | null;
+  dwellDurationMs: number;
 }
 
-const QUICK_PHRASES = [
-  'Yes',
-  'No',
-  'Thank you',
-  'Water, please',
-  'Need help',
-  'I am doing great',
-  'More time',
-  'Hello there',
+/**
+ * Two-stage letter selection.
+ *
+ * A full keyboard laid out as thirty small keys is not usable by eye gaze: at a
+ * realistic webcam accuracy of one to two degrees, a key is smaller than the
+ * error, so selections land on the wrong letter and the client is blamed for
+ * it. Grouping the alphabet into six large tiles and expanding the chosen group
+ * into six more keeps every target far larger than the error at both stages.
+ * It is the standard approach in eye-gaze communication aids, and it costs one
+ * extra selection per letter to gain a usable hit rate.
+ */
+const GROUPS: string[][] = [
+  ['A', 'B', 'C', 'D', 'E'],
+  ['F', 'G', 'H', 'I', 'J'],
+  ['K', 'L', 'M', 'N', 'O'],
+  ['P', 'Q', 'R', 'S', 'T'],
+  ['U', 'V', 'W', 'X', 'Y'],
+  ['Z', '.', '?', '!', ','],
 ];
 
-const KEYBOARD_ROWS = [
-  ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
-  ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
-  ['Z', 'X', 'C', 'V', 'B', 'N', 'M', 'SPACE', 'BACKSPACE'],
-];
+const PHRASES = ['Yes', 'No', 'Thank you', 'Please wait', 'I need help', 'More, please'];
 
-export const GazeTypingTask: React.FC<GazeTypingTaskProps> = ({ gaze }) => {
-  const [typedText, setTypedText] = useState('');
-  const [activeDwellKey, setActiveDwellKey] = useState<string | null>(null);
-  const [dwellProgress, setDwellProgress] = useState(0); // 0 to 1
-  const keyRefs = useRef<{ [key: string]: HTMLButtonElement | null }>({});
+type Tile =
+  | { kind: 'group'; id: string; label: string; index: number }
+  | { kind: 'letter'; id: string; label: string }
+  | { kind: 'action'; id: string; label: string; action: 'space' | 'back' | 'clear' | 'speak' | 'up' }
+  | { kind: 'phrase'; id: string; label: string }
+  | { kind: 'phrase-menu'; id: string; label: string };
 
-  const speakText = (text: string) => {
-    if (!text || typeof window === 'undefined') return;
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
-      soundEngine.playChime(600, 0.2);
+export const GazeTypingTask: React.FC<GazeTypingTaskProps> = ({ dwellDurationMs }) => {
+  const [text, setText] = useState('');
+  const [openGroup, setOpenGroup] = useState<number | null>(null);
+  const [showPhrases, setShowPhrases] = useState(false);
+  const tileRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [, setLayoutTick] = useState(0);
+
+  const speak = useCallback((value: string) => {
+    if (!value.trim() || !('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(value));
+  }, []);
+
+  const tiles: Tile[] = useMemo(() => {
+    if (showPhrases) {
+      return [
+        ...PHRASES.map((p, i) => ({ kind: 'phrase' as const, id: `phrase-${i}`, label: p })),
+        { kind: 'action' as const, id: 'up', label: 'Back', action: 'up' as const },
+        { kind: 'action' as const, id: 'speak', label: 'Speak', action: 'speak' as const },
+      ];
     }
-  };
+    if (openGroup !== null) {
+      return [
+        ...GROUPS[openGroup].map(letter => ({ kind: 'letter' as const, id: `letter-${letter}`, label: letter })),
+        { kind: 'action' as const, id: 'up', label: 'Back', action: 'up' as const },
+        { kind: 'action' as const, id: 'space', label: 'Space', action: 'space' as const },
+      ];
+    }
+    return [
+      ...GROUPS.map((group, i) => ({
+        kind: 'group' as const,
+        id: `group-${i}`,
+        label: `${group[0]} – ${group[group.length - 1]}`,
+        index: i,
+      })),
+      { kind: 'action' as const, id: 'space', label: 'Space', action: 'space' as const },
+      { kind: 'action' as const, id: 'back', label: 'Delete', action: 'back' as const },
+      { kind: 'phrase-menu' as const, id: 'phrases', label: 'Phrases' },
+      { kind: 'action' as const, id: 'speak', label: 'Speak', action: 'speak' as const },
+      { kind: 'action' as const, id: 'clear', label: 'Clear', action: 'clear' as const },
+    ];
+  }, [openGroup, showPhrases]);
 
-  // Check gaze collision on buttons
+  // Tile positions are read from the DOM, so the layout stays responsive and
+  // the dwell targets always match what is actually on screen.
   useEffect(() => {
-    if (!gaze) {
-      setActiveDwellKey(null);
-      setDwellProgress(0);
-      return;
-    }
+    const onResize = () => setLayoutTick(t => t + 1);
+    window.addEventListener('resize', onResize);
+    // One tick after mount so the refs are populated before targets are read.
+    const raf = requestAnimationFrame(() => setLayoutTick(t => t + 1));
+    return () => {
+      window.removeEventListener('resize', onResize);
+      cancelAnimationFrame(raf);
+    };
+  }, [tiles]);
 
-    const gx = gaze.screenX;
-    const gy = gaze.screenY;
+  const targets: DwellTarget[] = useMemo(() => {
+    return tiles
+      .map(tile => {
+        const el = tileRefs.current[tile.id];
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          id: tile.id,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          // An inscribed circle keeps neighbouring tiles from overlapping.
+          radius: Math.min(rect.width, rect.height) / 2,
+        };
+      })
+      .filter((t): t is DwellTarget => t !== null);
+    // Recomputed whenever the tiles change or the window resizes.
+  }, [tiles, setLayoutTick]);
 
-    let hoveredKey: string | null = null;
-    let minDistance = Infinity;
+  const handleSelect = useCallback(
+    (id: string) => {
+      const tile = tiles.find(t => t.id === id);
+      if (!tile) return;
 
-    // 1. Direct hit check
-    for (const [key, element] of Object.entries(keyRefs.current) as [string, HTMLButtonElement | null][]) {
-      if (element) {
-        const rect = element.getBoundingClientRect();
-        if (gx >= rect.left && gx <= rect.right && gy >= rect.top && gy <= rect.bottom) {
-          hoveredKey = key;
+      soundEngine.playChime(560, 0.1);
+
+      switch (tile.kind) {
+        case 'phrase-menu':
+          setShowPhrases(true);
           break;
-        } else {
-          // Calculate distance to key center
-          const kcx = (rect.left + rect.right) / 2;
-          const kcy = (rect.top + rect.bottom) / 2;
-          const dist = Math.hypot(gx - kcx, gy - kcy);
-          if (dist < 55 && dist < minDistance) {
-            minDistance = dist;
-            hoveredKey = key;
+        case 'group':
+          setOpenGroup(tile.index);
+          break;
+        case 'letter':
+          setText(t => t + tile.label);
+          setOpenGroup(null);
+          break;
+        case 'phrase':
+          setText(t => (t ? `${t} ${tile.label}` : tile.label));
+          setShowPhrases(false);
+          break;
+        case 'action':
+          if (tile.action === 'space') setText(t => `${t} `);
+          if (tile.action === 'back') setText(t => t.slice(0, -1));
+          if (tile.action === 'clear') setText('');
+          if (tile.action === 'up') {
+            setOpenGroup(null);
+            setShowPhrases(false);
           }
-        }
+          if (tile.action === 'speak') setText(t => (speak(t), t));
+          break;
       }
-    }
+    },
+    [tiles, speak]
+  );
 
-    if (hoveredKey) {
-      if (hoveredKey === activeDwellKey) {
-        setDwellProgress(prev => {
-          const next = prev + 0.09; // ~500-600ms dwell time
-          if (next >= 1) {
-            handleKeyAction(hoveredKey!);
-            return 0;
-          }
-          return next;
-        });
-      } else {
-        setActiveDwellKey(hoveredKey);
-        setDwellProgress(0.05);
-      }
-    } else {
-      setActiveDwellKey(null);
-      setDwellProgress(0);
-    }
-  }, [gaze, activeDwellKey]);
+  const dwell = useGazeDwell({ targets, dwellMs: dwellDurationMs, assistRadius: 20, onSelect: handleSelect });
 
-  const handleKeyAction = (key: string) => {
-    soundEngine.playChime(520, 0.15);
-
-    if (key === 'SPACE') {
-      setTypedText(t => t + ' ');
-    } else if (key === 'BACKSPACE') {
-      setTypedText(t => t.slice(0, -1));
-    } else if (key.startsWith('phrase:')) {
-      const phrase = key.replace('phrase:', '');
-      setTypedText(phrase);
-      speakText(phrase);
-    } else {
-      setTypedText(t => t + key);
-    }
+  const iconFor = (tile: Tile) => {
+    if (tile.kind !== 'action') return null;
+    if (tile.action === 'speak') return <Volume2 className="w-5 h-5" />;
+    if (tile.action === 'back') return <Delete className="w-5 h-5" />;
+    if (tile.action === 'clear') return <Trash2 className="w-5 h-5" />;
+    if (tile.action === 'up') return <CornerUpLeft className="w-5 h-5" />;
+    return null;
   };
 
   return (
-    <div id="gaze-typing-view" className="relative w-full h-full flex flex-col bg-slate-950 p-6 select-none overflow-y-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="w-10 h-10 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-            <MessageSquare className="w-5 h-5" />
-          </div>
-          <div>
-            <h3 className="text-base font-bold font-['Outfit'] text-white">
-              Gaze Communicator
-            </h3>
-            <p className="text-xs text-slate-400">
-              Rest your gaze on any letter or phrase for 0.6s to select
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            id="speak-text-btn"
-            onClick={() => speakText(typedText)}
-            disabled={!typedText}
-            className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-40 text-white text-xs font-semibold flex items-center gap-2 shadow-lg shadow-cyan-500/20 transition-all cursor-pointer"
-          >
-            <Volume2 className="w-4 h-4" />
-            <span>Speak Out Loud</span>
-          </button>
-          <button
-            id="clear-typed-text-btn"
-            onClick={() => setTypedText('')}
-            className="p-2 rounded-xl border border-slate-800 bg-slate-900 text-slate-400 hover:text-white transition-colors cursor-pointer"
-            title="Clear Text"
-          >
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
+    <div className="absolute inset-0 flex flex-col p-6 gap-5">
+      <div className="surface rounded-2xl px-6 py-5 min-h-[92px] flex items-center">
+        <p className="text-2xl text-ink break-words">
+          {text || <span className="text-ink-faint">Look at a group of letters to begin…</span>}
+        </p>
       </div>
 
-      {/* Live Text Output Display */}
-      <div className="w-full min-h-[72px] bg-slate-900/90 border border-slate-800/90 rounded-2xl p-4 mb-4 flex items-center justify-between text-lg font-medium text-white shadow-inner">
-        <div className="tracking-wide">
-          {typedText || (
-            <span className="text-slate-500 italic text-sm">
-              Your gaze-composed sentence will appear here...
-            </span>
-          )}
-        </div>
-        {typedText && (
-          <span className="w-2 h-5 bg-cyan-400 animate-pulse rounded-full ml-2 inline-block" />
-        )}
+      <div className="flex-1 grid grid-cols-3 sm:grid-cols-4 gap-4 min-h-0">
+        {tiles.map(tile => {
+          const isActive = dwell.activeId === tile.id;
+          const progress = isActive ? dwell.progress : 0;
+          return (
+            <button
+              key={tile.id}
+              ref={el => {
+                tileRefs.current[tile.id] = el;
+              }}
+              onClick={() => handleSelect(tile.id)}
+              className={`relative rounded-2xl border-2 flex items-center justify-center gap-2 text-xl font-semibold transition-colors overflow-hidden ${
+                isActive
+                  ? 'border-sage-400 bg-sage-50 text-sage-700'
+                  : 'border-soft bg-[var(--surface-raised)] text-ink hover:border-strong'
+              }`}
+            >
+              {/* The fill sweeps upward as the dwell completes, which reads as
+                  progress without needing a separate ring to look at. */}
+              <span
+                className="absolute inset-x-0 bottom-0 bg-sage-200/70 pointer-events-none"
+                style={{ height: `${progress * 100}%`, transition: 'height 60ms linear' }}
+              />
+              <span className="relative flex items-center gap-2">
+                {iconFor(tile)}
+                {tile.label}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
-      {/* Quick Phrases Section */}
-      <div className="mb-4">
-        <div className="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wider">
-          Quick Essential Phrases
-        </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          {QUICK_PHRASES.map(phrase => {
-            const keyId = `phrase:${phrase}`;
-            const isHovered = activeDwellKey === keyId;
-
-            return (
-              <button
-                key={phrase}
-                ref={el => { keyRefs.current[keyId] = el; }}
-                onClick={() => {
-                  setTypedText(phrase);
-                  speakText(phrase);
-                }}
-                className={`relative px-4 py-3 rounded-2xl border text-xs font-semibold text-left transition-all duration-150 overflow-hidden cursor-pointer ${
-                  isHovered
-                    ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 scale-105 shadow-[0_0_15px_rgba(6,182,212,0.3)]'
-                    : 'border-slate-800 bg-slate-900/80 text-slate-300 hover:border-slate-700'
-                }`}
-              >
-                {/* Dwell Fill Bar */}
-                {isHovered && (
-                  <div
-                    className="absolute inset-0 bg-cyan-500/30 -z-10 transition-all duration-75"
-                    style={{ width: `${dwellProgress * 100}%` }}
-                  />
-                )}
-                <span>{phrase}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Gaze Keyboard Matrix */}
-      <div className="space-y-2 max-w-3xl mx-auto w-full">
-        {KEYBOARD_ROWS.map((row, rIdx) => (
-          <div key={rIdx} className="flex gap-2 justify-center">
-            {row.map(char => {
-              const isHovered = activeDwellKey === char;
-              const isSpecial = char === 'SPACE' || char === 'BACKSPACE';
-
-              return (
-                <button
-                  key={char}
-                  ref={el => { keyRefs.current[char] = el; }}
-                  onClick={() => handleKeyAction(char)}
-                  className={`relative py-3.5 px-3 rounded-xl border text-sm font-semibold transition-all duration-150 overflow-hidden cursor-pointer flex items-center justify-center ${
-                    isSpecial ? 'flex-1 max-w-[140px] text-xs' : 'w-12 h-14'
-                  } ${
-                    isHovered
-                      ? 'border-cyan-400 bg-cyan-500/25 text-white scale-110 shadow-[0_0_15px_rgba(6,182,212,0.35)]'
-                      : 'border-slate-800 bg-slate-900/80 text-slate-300 hover:border-slate-700'
-                  }`}
-                >
-                  {isHovered && (
-                    <div
-                      className="absolute inset-0 bg-cyan-500/40 -z-10 transition-all duration-75"
-                      style={{ width: `${dwellProgress * 100}%` }}
-                    />
-                  )}
-                  {char === 'BACKSPACE' ? <Delete className="w-4 h-4" /> : char}
-                </button>
-              );
-            })}
-          </div>
-        ))}
-      </div>
+      <p className="text-xs text-ink-faint text-center">
+        Hold your gaze on a tile for {(dwellDurationMs / 1000).toFixed(1)} seconds to choose it. You can change
+        that in settings.
+      </p>
     </div>
   );
 };

@@ -1,17 +1,55 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-import { GazeState, HeadPose, Point2D, TrackingSettings } from '../types';
+import { CalibrationSample, GazeState, HeadPose, OcularEvent, Point2D, TrackingSettings } from '../types';
 import { calibrationEngine } from './calibration';
+import { extractGazeFeatures } from './gazeFeatures';
+import { gazeBus } from './gazeBus';
 import { soundEngine } from './audio';
 import { OneEuroFilter2D } from './oneEuroFilter';
+import { viewingGeometry } from './viewingGeometry';
 
 export type TrackerStatus = 'uninitialized' | 'loading_model' | 'requesting_camera' | 'running' | 'error';
 
 export interface TrackerCallbacks {
   onStatusChange?: (status: TrackerStatus, errorMsg?: string) => void;
-  onGazeUpdate?: (gaze: GazeState) => void;
   onVideoFrame?: (video: HTMLVideoElement, landmarks?: any) => void;
   onBlink?: (eye: 'left' | 'right' | 'both') => void;
 }
+
+export const DEFAULT_TRACKING_SETTINGS: TrackingSettings = {
+  oneEuroMinCutoff: 0.9,
+  oneEuroBeta: 0.05,
+  saccadeVelocityThreshold: 32,
+  sensitivityX: 1,
+  sensitivityY: 1,
+  deadzone: 4,
+  nudgeOffsetX: 0,
+  nudgeOffsetY: 0,
+  trackingEngineMode: 'binocular',
+  magneticSnapAssist: true,
+  magneticSnapRadius: 110,
+  snapToGrid: false,
+  gridSnapSize: 40,
+  dwellDurationMs: 900,
+  invertX: false,
+  invertY: false,
+  holdThroughBlinks: true,
+  minConfidence: 0.2,
+  penMode: 'auto_stream',
+  audioEnabled: true,
+  showWebcamPiP: true,
+  showLandmarkMesh: true,
+  showGazeTrail: true,
+  showGazeReticle: true,
+  showPostureGuide: true,
+  strokeColor: '#3f7f75',
+  strokeGlowColor: '#7cc4b6',
+  strokeWidth: 6,
+};
+
+/** Landmarks stay unstable for a moment after the lids reopen. */
+const POST_BLINK_HOLD_MS = 110;
+/** A fixation is only declared once the eye has been slow for this long. */
+const FIXATION_ONSET_MS = 60;
 
 export class FaceMeshTracker {
   private faceLandmarker: FaceLandmarker | null = null;
@@ -21,50 +59,42 @@ export class FaceMeshTracker {
   private status: TrackerStatus = 'uninitialized';
   private callbacks: TrackerCallbacks = {};
   private lastVideoTime = -1;
+  private disposed = false;
 
-  // 1€ (One-Euro) Adaptive Filters for zero-lag saccades + tremor-free fixations
-  private screenOneEuroFilter = new OneEuroFilter2D(0.8, 0.04);
-  private rawOneEuroFilter = new OneEuroFilter2D(0.8, 0.04);
+  // A light filter on the eye measurement itself, before the mapping can
+  // amplify landmark noise, plus the user-tunable filter on screen position.
+  private featureFilter = new OneEuroFilter2D(2.5, 0.02);
+  private screenFilter = new OneEuroFilter2D(0.9, 0.05);
 
-  private filteredScreenX = window.innerWidth / 2;
-  private filteredScreenY = window.innerHeight / 2;
-  private filteredRawX = 0;
-  private filteredRawY = 0;
+  private lastScreen: Point2D = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  private lastGoodScreen: Point2D = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  private lastFeature: Point2D = { x: 0, y: 0 };
+  private lastHeadPose: HeadPose | null = null;
+
+  private blinkCount = 0;
+  private lastBlinkBoth = false;
   private lastBlinkLeft = false;
   private lastBlinkRight = false;
-  private blinkCount = 0;
+  private lastBlinkEndTime = 0;
   private lastBlinkTime = 0;
 
-  // Fixation stability tracking
-  private fixationBuffer: Point2D[] = [];
-  private isFixating = false;
-  private lastSnappedTarget: { x: number; y: number } | null = null;
+  private event: OcularEvent = 'lost';
+  private slowSinceMs: number | null = null;
+  private fixationStart = 0;
+  private fixationCentre: Point2D | null = null;
+  private fixationPoints: Point2D[] = [];
+  private velocityDegPerSec = 0;
+  private lastSampleTime = 0;
+  /** Previous emitted position, used only for the velocity estimate. */
+  private prevVelocityPoint: Point2D | null = null;
 
-  private settings: TrackingSettings = {
-    smoothingFactor: 0.18,
-    oneEuroMinCutoff: 0.8,
-    oneEuroBeta: 0.04,
-    saccadeThreshold: 45,
-    sensitivityX: 1.3,
-    sensitivityY: 1.3,
-    deadzone: 5,
-    snapToGrid: false,
-    gridSnapSize: 40,
-    dwellDurationMs: 800,
-    invertX: false,
-    invertY: false,
-    useHeadCompensation: true,
-    useQuadraticMapping: true,
-    penMode: 'auto_stream',
-    audioEnabled: true,
-    showWebcamPiP: true,
-    showLandmarkMesh: true,
-    showGazeTrail: true,
-    showGazeReticle: true,
-    strokeColor: '#10b981',
-    strokeGlowColor: '#059669',
-    strokeWidth: 5,
-  };
+  private lastSnappedTarget: Point2D | null = null;
+  private simulatedPointer = false;
+
+  /** Live sample sink used by the calibration screens. */
+  private sampleCollector: ((sample: CalibrationSample, gaze: GazeState, usable: boolean) => void) | null = null;
+
+  private settings: TrackingSettings = { ...DEFAULT_TRACKING_SETTINGS };
 
   constructor(callbacks: TrackerCallbacks = {}) {
     this.callbacks = callbacks;
@@ -76,16 +106,7 @@ export class FaceMeshTracker {
 
   public updateSettings(newSettings: Partial<TrackingSettings>) {
     this.settings = { ...this.settings, ...newSettings };
-    if (newSettings.oneEuroMinCutoff !== undefined || newSettings.oneEuroBeta !== undefined) {
-      this.screenOneEuroFilter.setParameters(
-        this.settings.oneEuroMinCutoff || 0.8,
-        this.settings.oneEuroBeta || 0.04
-      );
-      this.rawOneEuroFilter.setParameters(
-        this.settings.oneEuroMinCutoff || 0.8,
-        this.settings.oneEuroBeta || 0.04
-      );
-    }
+    this.screenFilter.setParameters(this.settings.oneEuroMinCutoff, this.settings.oneEuroBeta);
   }
 
   public getSettings(): TrackingSettings {
@@ -96,7 +117,17 @@ export class FaceMeshTracker {
     return this.status;
   }
 
+  /**
+   * Registers a sink that receives every usable frame as a calibration sample.
+   * Calibration screens use this to collect a full dwell of data rather than a
+   * single instant.
+   */
+  public collectSamples(sink: ((sample: CalibrationSample, gaze: GazeState, usable: boolean) => void) | null) {
+    this.sampleCollector = sink;
+  }
+
   public async initialize(): Promise<void> {
+    this.disposed = false;
     try {
       this.setStatus('loading_model');
 
@@ -104,25 +135,55 @@ export class FaceMeshTracker {
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
       );
 
-      this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-          delegate: 'GPU',
-        },
-        runningMode: 'VIDEO',
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: true,
-      });
+      const baseOptions = {
+        modelAssetPath:
+          'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+      };
+
+      // Prefer the GPU delegate, but fall back to CPU rather than failing
+      // outright — plenty of clinic machines have no usable WebGL context.
+      try {
+        this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: { ...baseOptions, delegate: 'GPU' },
+          runningMode: 'VIDEO',
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          outputFacialTransformationMatrixes: true,
+        });
+      } catch (gpuErr) {
+        console.warn('GPU delegate unavailable, falling back to CPU', gpuErr);
+        this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+          baseOptions: { ...baseOptions, delegate: 'CPU' },
+          runningMode: 'VIDEO',
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          outputFacialTransformationMatrixes: true,
+        });
+      }
 
       this.setStatus('requesting_camera');
       await this.startCamera();
+      if (this.disposed) return;
       this.setStatus('running');
       this.startTrackingLoop();
     } catch (err: any) {
-      console.error('Tracker initialization failed:', err);
-      this.setStatus('error', err?.message || 'Failed to initialize camera or vision model');
+      console.error('Tracker initialisation failed:', err);
+      this.setStatus('error', this.describeCameraError(err));
     }
+  }
+
+  private describeCameraError(err: any): string {
+    const name = err?.name || '';
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      return 'The browser blocked camera access. Allow the camera for this site, then try again.';
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'No camera was found. Connect a webcam, or continue with the mouse instead.';
+    }
+    if (name === 'NotReadableError') {
+      return 'The camera is in use by another application. Close it and try again.';
+    }
+    return err?.message || 'The camera could not be started.';
   }
 
   private setStatus(status: TrackerStatus, errorMsg?: string) {
@@ -133,22 +194,30 @@ export class FaceMeshTracker {
   private async startCamera(): Promise<void> {
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());
+      this.stream = null;
     }
 
-    const video = document.createElement('video');
-    video.playsInline = true;
-    video.autoplay = true;
-    video.muted = true;
-    video.setAttribute('style', 'position: fixed; top: -9999px; left: -9999px; opacity: 0; pointer-events: none;');
-    document.body.appendChild(video);
-    this.videoElement = video;
+    if (!this.videoElement) {
+      const video = document.createElement('video');
+      video.playsInline = true;
+      video.autoplay = true;
+      video.muted = true;
+      video.setAttribute('style', 'position: fixed; top: -9999px; left: -9999px; opacity: 0; pointer-events: none;');
+      document.body.appendChild(video);
+      this.videoElement = video;
+    }
 
+    // Resolution is the cheapest accuracy win available. At 640×480 an eye is
+    // roughly 60 px across, so one pixel of iris-centre noise is a large
+    // fraction of a degree; at 1280×720 the same noise is worth about half as
+    // much. Frame rate is capped at 30 because the extra frames cost detection
+    // time we would rather spend on resolution.
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
-        width: { ideal: 640 },
-        height: { ideal: 480 },
+        width: { ideal: 1280, min: 640 },
+        height: { ideal: 720, min: 480 },
         facingMode: 'user',
-        frameRate: { ideal: 60, max: 60 },
+        frameRate: { ideal: 30, max: 30 },
       },
       audio: false,
     });
@@ -156,9 +225,12 @@ export class FaceMeshTracker {
     this.stream = stream;
     this.videoElement.srcObject = stream;
 
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
+      const video = this.videoElement!;
+      const timeout = setTimeout(() => reject(new Error('The camera did not start in time.')), 12000);
       video.onloadedmetadata = () => {
-        video.play().then(() => resolve());
+        clearTimeout(timeout);
+        video.play().then(() => resolve()).catch(reject);
       };
     });
   }
@@ -167,8 +239,19 @@ export class FaceMeshTracker {
     return this.videoElement;
   }
 
+  /** Actual capture resolution, once the browser has picked one. */
+  public getCaptureResolution(): { width: number; height: number } | null {
+    const track = this.stream?.getVideoTracks()[0];
+    if (!track) return null;
+    const settings = track.getSettings();
+    if (!settings.width || !settings.height) return null;
+    return { width: settings.width, height: settings.height };
+  }
+
   private startTrackingLoop() {
     const processFrame = () => {
+      if (this.disposed) return;
+
       if (this.status !== 'running' || !this.faceLandmarker || !this.videoElement) {
         this.animationFrameId = requestAnimationFrame(processFrame);
         return;
@@ -177,21 +260,27 @@ export class FaceMeshTracker {
       const video = this.videoElement;
       if (video.readyState >= 2 && video.currentTime !== this.lastVideoTime) {
         this.lastVideoTime = video.currentTime;
-        const startTimeMs = performance.now();
 
         try {
-          const results = this.faceLandmarker.detectForVideo(video, startTimeMs);
-          if (results && results.faceLandmarks && results.faceLandmarks.length > 0) {
-            const landmarks = results.faceLandmarks[0];
-            const blendshapes = results.faceBlendshapes?.[0]?.categories || [];
+          const results = this.faceLandmarker.detectForVideo(video, performance.now());
+          const landmarks = results?.faceLandmarks?.[0];
 
-            this.processLandmarks(landmarks, blendshapes);
+          if (landmarks && landmarks.length > 0) {
+            const blendshapes: Record<string, number> = {};
+            for (const cat of results.faceBlendshapes?.[0]?.categories || []) {
+              blendshapes[cat.categoryName] = cat.score;
+            }
+            const matrix = results.facialTransformationMatrixes?.[0]?.data;
+            this.processFrame(landmarks, blendshapes, matrix);
             this.callbacks.onVideoFrame?.(video, landmarks);
           } else {
+            this.emitLost();
             this.callbacks.onVideoFrame?.(video, null);
           }
-        } catch {
-          // Frame skip or minor pipeline hiccup
+        } catch (err) {
+          // A dropped frame is normal under load; a persistent failure will
+          // show up as a lost-tracking state rather than a crash.
+          this.emitLost();
         }
       }
 
@@ -201,298 +290,372 @@ export class FaceMeshTracker {
     this.animationFrameId = requestAnimationFrame(processFrame);
   }
 
-  private processLandmarks(landmarks: any[], blendshapes: any[]) {
-    // -------------------------------------------------------------
-    // 1. Anatomical Iris-to-Canthus Landmark Extraction
-    // -------------------------------------------------------------
-    // Left eye (viewer's left / user's right side in mirrored feed):
-    // Iris center: 468; Outer canthus: 33; Inner canthus: 133; Top: 159; Bottom: 145
-    // Right eye (viewer's right / user's left side in mirrored feed):
-    // Iris center: 473; Inner canthus: 362; Outer canthus: 263; Top: 386; Bottom: 374
-    const irisLeft = landmarks[468] || landmarks[159];
-    const irisRight = landmarks[473] || landmarks[386];
+  private emitLost() {
+    if (this.simulatedPointer) return;
+    this.event = 'lost';
+    const gaze = this.buildGazeState({
+      screen: this.lastGoodScreen,
+      feature: this.lastFeature,
+      headPose: this.lastHeadPose,
+      confidence: 0,
+      isHeld: true,
+      blinkingLeft: false,
+      blinkingRight: false,
+      event: 'lost',
+      now: Date.now(),
+    });
+    gazeBus.publish(gaze);
+  }
 
-    const leftOuter = landmarks[33];
-    const leftInner = landmarks[133];
-    const rightInner = landmarks[362];
-    const rightOuter = landmarks[263];
-
-    const leftTop = landmarks[159];
-    const leftBottom = landmarks[145];
-    const rightTop = landmarks[386];
-    const rightBottom = landmarks[374];
-
-    // Compute head pose based on key facial geometry
-    const noseTip = landmarks[1];
-    const chin = landmarks[152];
-    const forehead = landmarks[10];
-    const leftCheek = landmarks[234];
-    const rightCheek = landmarks[454];
-
-    let headYaw = 0;
-    let headPitch = 0;
-    let headRoll = 0;
-
-    if (noseTip && leftCheek && rightCheek && forehead && chin) {
-      const faceWidth = Math.abs(rightCheek.x - leftCheek.x) || 1;
-      const noseCenterX = (leftCheek.x + rightCheek.x) / 2;
-      headYaw = (noseTip.x - noseCenterX) / faceWidth; // Negative = turned left, Positive = turned right
-
-      const faceHeight = Math.abs(chin.y - forehead.y) || 1;
-      const noseCenterY = (forehead.y + chin.y) / 2;
-      headPitch = (noseTip.y - noseCenterY) / faceHeight; // Up / Down
-
-      const dx = rightCheek.x - leftCheek.x;
-      const dy = rightCheek.y - leftCheek.y;
-      headRoll = Math.atan2(dy, dx);
-    }
-
-    const headPose: HeadPose = { pitch: headPitch, yaw: headYaw, roll: headRoll };
-
-    // Blendshape lookup
-    const bsMap: { [key: string]: number } = {};
-    for (const cat of blendshapes) {
-      bsMap[cat.categoryName] = cat.score;
-    }
-
-    const blinkLeftScore = bsMap['eyeBlinkLeft'] || 0;
-    const blinkRightScore = bsMap['eyeBlinkRight'] || 0;
-    const isBlinkingLeft = blinkLeftScore > 0.45;
-    const isBlinkingRight = blinkRightScore > 0.45;
-    const isBlinkingBoth = isBlinkingLeft && isBlinkingRight;
-
+  private processFrame(landmarks: any[], blendshapes: Record<string, number>, matrix?: Float32Array | number[]) {
     const now = Date.now();
-    if (isBlinkingBoth && (!this.lastBlinkLeft || !this.lastBlinkRight)) {
-      if (now - this.lastBlinkTime > 300) {
+    const extracted = extractGazeFeatures(landmarks, blendshapes, matrix);
+    if (!extracted) {
+      this.emitLost();
+      return;
+    }
+
+    const { features, headPose } = extracted;
+    this.lastHeadPose = headPose;
+    viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm);
+
+    // --- Blink bookkeeping ---------------------------------------------------
+    const blinkingBoth = features.isBlinkingBoth;
+    if (blinkingBoth && !this.lastBlinkBoth) {
+      if (now - this.lastBlinkTime > 250) {
         this.blinkCount++;
         this.lastBlinkTime = now;
         this.callbacks.onBlink?.('both');
         soundEngine.playBlinkClick();
       }
-    } else if (isBlinkingLeft && !this.lastBlinkLeft && !isBlinkingBoth) {
-      this.callbacks.onBlink?.('left');
-    } else if (isBlinkingRight && !this.lastBlinkRight && !isBlinkingBoth) {
-      this.callbacks.onBlink?.('right');
+    } else if (!blinkingBoth && this.lastBlinkBoth) {
+      this.lastBlinkEndTime = now;
     }
 
-    this.lastBlinkLeft = isBlinkingLeft;
-    this.lastBlinkRight = isBlinkingRight;
+    if (features.isBlinkingLeft && !this.lastBlinkLeft && !blinkingBoth) this.callbacks.onBlink?.('left');
+    if (features.isBlinkingRight && !this.lastBlinkRight && !blinkingBoth) this.callbacks.onBlink?.('right');
 
-    // -------------------------------------------------------------
-    // 2. 3D Spherical Eyeball Gaze Vector Projection
-    // -------------------------------------------------------------
-    // Inspired by academic pupil tracking (e.g. JEOresearch), we estimate a 3D 
-    // spherical eyeball model to compute the true rotational gaze vector.
-    let leftGazeYaw = 0;
-    let leftGazePitch = 0;
-    if (leftOuter && leftInner && leftTop && leftBottom && irisLeft) {
-      // Estimate eyeball radius from canthus-to-canthus span
-      const eyeWidth = Math.hypot(leftInner.x - leftOuter.x, leftInner.y - leftOuter.y);
-      const eyeRadius = eyeWidth / 2.0;
+    this.lastBlinkBoth = blinkingBoth;
+    this.lastBlinkLeft = features.isBlinkingLeft;
+    this.lastBlinkRight = features.isBlinkingRight;
 
-      // Estimate center of eye socket rotation
-      const centerX = (leftInner.x + leftOuter.x) / 2.0;
-      const centerY = (leftTop.y + leftBottom.y) / 2.0;
+    const inBlinkShadow = blinkingBoth || now - this.lastBlinkEndTime < POST_BLINK_HOLD_MS;
 
-      // Calculate 3D spherical rotation angles (arcsin of normalized displacement)
-      const dx = (irisLeft.x - centerX) / (eyeRadius || 0.001);
-      const dy = (irisLeft.y - centerY) / ((leftBottom.y - leftTop.y) / 2.0 || 0.001); // Eyes are often elliptical in camera view
+    // --- Choose the eye measurement to map -----------------------------------
+    const mode = this.settings.trackingEngineMode || 'binocular';
+    let gx = features.gx;
+    let gy = features.gy;
 
-      leftGazeYaw = Math.asin(Math.max(-1, Math.min(1, dx))) * 1.5;
-      leftGazePitch = Math.asin(Math.max(-1, Math.min(1, dy))) * 1.5;
+    if (mode === 'left_eye' && features.leftGx !== null && features.leftGy !== null) {
+      gx = features.leftGx;
+      gy = features.leftGy;
+    } else if (mode === 'right_eye' && features.rightGx !== null && features.rightGy !== null) {
+      gx = features.rightGx;
+      gy = features.rightGy;
+    } else if (mode === 'head_pointer') {
+      // Head pointing, for users whose eye movement is unreliable or who are
+      // being assessed on head control rather than gaze.
+      gx = headPose.yaw * 0.25;
+      gy = -headPose.pitch * 0.25;
     }
 
-    let rightGazeYaw = 0;
-    let rightGazePitch = 0;
-    if (rightOuter && rightInner && rightTop && rightBottom && irisRight) {
-      const eyeWidth = Math.hypot(rightOuter.x - rightInner.x, rightOuter.y - rightInner.y);
-      const eyeRadius = eyeWidth / 2.0;
+    if (this.settings.invertX) gx = -gx;
+    if (this.settings.invertY) gy = -gy;
 
-      const centerX = (rightOuter.x + rightInner.x) / 2.0;
-      const centerY = (rightTop.y + rightBottom.y) / 2.0;
+    const filteredFeature = this.featureFilter.filter(gx, gy, now);
+    this.lastFeature = filteredFeature;
 
-      const dx = (irisRight.x - centerX) / (eyeRadius || 0.001);
-      const dy = (irisRight.y - centerY) / ((rightBottom.y - rightTop.y) / 2.0 || 0.001);
+    const confidence = mode === 'head_pointer' ? 0.9 : features.quality;
 
-      rightGazeYaw = Math.asin(Math.max(-1, Math.min(1, dx))) * 1.5;
-      rightGazePitch = Math.asin(Math.max(-1, Math.min(1, dy))) * 1.5;
-    }
+    // --- Offer the frame to any active calibration screen --------------------
+    // Samples are offered before blink gating so the collector can see, and
+    // reject, exactly the same frames the mapping would reject.
+    const usableForCalibration = !inBlinkShadow && confidence >= this.settings.minConfidence;
 
-    const anatomicalGazeX = (leftGazeYaw + rightGazeYaw) / 2;
-    const anatomicalGazeY = (leftGazePitch + rightGazePitch) / 2;
-
-    // Blendshape gaze fusion
-    const lookInL = bsMap['eyeLookInLeft'] || 0;
-    const lookOutL = bsMap['eyeLookOutLeft'] || 0;
-    const lookInR = bsMap['eyeLookInRight'] || 0;
-    const lookOutR = bsMap['eyeLookOutRight'] || 0;
-    const lookUpL = bsMap['eyeLookUpLeft'] || 0;
-    const lookDownL = bsMap['eyeLookDownLeft'] || 0;
-    const lookUpR = bsMap['eyeLookUpRight'] || 0;
-    const lookDownR = bsMap['eyeLookDownRight'] || 0;
-
-    const bsGazeX = ((lookOutR + lookInL) - (lookOutL + lookInR)) * 0.75;
-    const bsGazeY = (((lookDownL + lookDownR) / 2) - ((lookUpL + lookUpR) / 2)) * 0.85;
-
-    // Multi-Mode Tracking Engine Selection
-    const mode = this.settings.trackingEngineMode || 'hybrid_gaze';
-
-    let rawX = 0;
-    let rawY = 0;
-
-    if (mode === 'head_laser') {
-      // Head-Laser Pointer: uses 3D head yaw/pitch vector for ultra-stable linear drawing
-      rawX = headYaw * 1.6;
-      rawY = headPitch * 1.8;
-    } else if (mode === 'iris_only') {
-      // Pure Iris Anatomical Tracking without blendshapes
-      rawX = anatomicalGazeX;
-      rawY = anatomicalGazeY;
-    } else {
-      // Hybrid Gaze: 65% anatomical iris-to-canthus ratio + 35% neural blendshape fusion
-      rawX = anatomicalGazeX * 0.65 + bsGazeX * 0.35;
-      rawY = anatomicalGazeY * 0.65 + bsGazeY * 0.35;
-    }
-
-    if (this.settings.invertX) rawX = -rawX;
-    if (this.settings.invertY) rawY = -rawY;
-
+    // --- Map to the screen ---------------------------------------------------
     const scrW = window.innerWidth;
     const scrH = window.innerHeight;
 
-    // -------------------------------------------------------------
-    // 3. High-Order Quadratic / Polynomial Calibration Mapping
-    // -------------------------------------------------------------
-    const screenTarget = calibrationEngine.mapRawGazeToScreen(
-      rawX,
-      rawY,
-      headYaw,
-      headPitch,
+    const mapped = calibrationEngine.mapToScreen(
+      filteredFeature.x,
+      filteredFeature.y,
+      headPose,
       scrW,
       scrH,
       this.settings.sensitivityX,
-      this.settings.sensitivityY,
-      mode !== 'iris_only' && this.settings.useHeadCompensation,
-      this.settings.useQuadraticMapping !== false
+      this.settings.sensitivityY
     );
 
-    // Apply Live User Nudge Offsets (if configured)
-    const nudgeX = this.settings.nudgeOffsetX || 0;
-    const nudgeY = this.settings.nudgeOffsetY || 0;
-    screenTarget.x = Math.max(5, Math.min(scrW - 5, screenTarget.x + nudgeX));
-    screenTarget.y = Math.max(5, Math.min(scrH - 5, screenTarget.y + nudgeY));
+    let screen: Point2D;
+    let isHeld = false;
 
-    // -------------------------------------------------------------
-    // 4. 1€ (One-Euro) Adaptive Filtering
-    // -------------------------------------------------------------
-    // Deadzone dampening: suppress sub-pixel involuntary microsaccades
-    const distToTarget = Math.hypot(screenTarget.x - this.filteredScreenX, screenTarget.y - this.filteredScreenY);
-    let targetToFilterX = screenTarget.x;
-    let targetToFilterY = screenTarget.y;
-
-    if (distToTarget < (this.settings.deadzone || 5)) {
-      targetToFilterX = this.filteredScreenX;
-      targetToFilterY = this.filteredScreenY;
+    if (!mapped) {
+      // Uncalibrated: a plain linear guess, deliberately gentle, so the user can
+      // see that tracking is alive without mistaking it for a working mapping.
+      screen = {
+        x: scrW * (0.5 + filteredFeature.x * 3.2 * this.settings.sensitivityX),
+        y: scrH * (0.5 + filteredFeature.y * 3.6 * this.settings.sensitivityY),
+      };
+    } else {
+      screen = mapped;
     }
 
-    const filteredScreen = this.screenOneEuroFilter.filter(targetToFilterX, targetToFilterY, now);
-    const filteredRaw = this.rawOneEuroFilter.filter(rawX, rawY, now);
-
-    this.filteredScreenX = filteredScreen.x;
-    this.filteredScreenY = filteredScreen.y;
-    this.filteredRawX = filteredRaw.x;
-    this.filteredRawY = filteredRaw.y;
-
-    // Fixation check
-    this.fixationBuffer.push({ x: this.filteredScreenX, y: this.filteredScreenY, time: now });
-    if (this.fixationBuffer.length > 20) this.fixationBuffer.shift();
-
-    let isFixatingNow = false;
-    if (this.fixationBuffer.length >= 10) {
-      const recent = this.fixationBuffer.slice(-10);
-      const avgX = recent.reduce((sum, p) => sum + p.x, 0) / recent.length;
-      const avgY = recent.reduce((sum, p) => sum + p.y, 0) / recent.length;
-      const maxDev = Math.max(...recent.map(p => Math.hypot(p.x - avgX, p.y - avgY)));
-      isFixatingNow = maxDev < 32;
+    if (inBlinkShadow && this.settings.holdThroughBlinks) {
+      // Hold the last confident estimate rather than following the lids down.
+      screen = this.lastGoodScreen;
+      isHeld = true;
+    } else if (confidence < this.settings.minConfidence) {
+      screen = this.lastGoodScreen;
+      isHeld = true;
     }
-    this.isFixating = isFixatingNow;
 
-    // Grid snapping logic when focus is maintained
-    let finalScreenX = this.filteredScreenX;
-    let finalScreenY = this.filteredScreenY;
+    screen = {
+      x: Math.max(0, Math.min(scrW, screen.x)),
+      y: Math.max(0, Math.min(scrH, screen.y)),
+    };
+
+    // Deadzone: hold still through sub-threshold tremor so a resting gaze does
+    // not visibly shimmer.
+    const travel = Math.hypot(screen.x - this.lastScreen.x, screen.y - this.lastScreen.y);
+    const targetX = travel < this.settings.deadzone ? this.lastScreen.x : screen.x;
+    const targetY = travel < this.settings.deadzone ? this.lastScreen.y : screen.y;
+
+    const filtered = isHeld
+      ? { x: this.lastScreen.x, y: this.lastScreen.y }
+      : this.screenFilter.filter(targetX, targetY, now);
+
+    this.lastScreen = filtered;
+    if (!isHeld) this.lastGoodScreen = filtered;
+
+    // --- Velocity-based event classification (I-VT) --------------------------
+    const dtSec = this.lastSampleTime > 0 ? Math.max(0.008, (now - this.lastSampleTime) / 1000) : 0.033;
+    this.lastSampleTime = now;
+
+    const previous = this.prevVelocityPoint ?? filtered;
+    const travelDeg = viewingGeometry.pixelsToDegrees(
+      Math.hypot(filtered.x - previous.x, filtered.y - previous.y)
+    );
+    this.prevVelocityPoint = { x: filtered.x, y: filtered.y };
+    const instantVelocity = travelDeg / dtSec;
+    // Light smoothing so a single noisy frame cannot flip the classification.
+    this.velocityDegPerSec = this.velocityDegPerSec * 0.6 + instantVelocity * 0.4;
+
+    let event: OcularEvent;
+    if (inBlinkShadow) {
+      event = 'blink';
+      this.slowSinceMs = null;
+    } else if (this.velocityDegPerSec > this.settings.saccadeVelocityThreshold) {
+      event = 'saccade';
+      this.slowSinceMs = null;
+    } else {
+      if (this.slowSinceMs === null) this.slowSinceMs = now;
+      event = now - this.slowSinceMs >= FIXATION_ONSET_MS ? 'fixation' : 'saccade';
+    }
+
+    if (event === 'fixation') {
+      if (this.event !== 'fixation') {
+        this.fixationStart = this.slowSinceMs ?? now;
+        this.fixationPoints = [];
+      }
+      this.fixationPoints.push({ x: filtered.x, y: filtered.y, time: now });
+      if (this.fixationPoints.length > 120) this.fixationPoints.shift();
+      const cx = this.fixationPoints.reduce((s, p) => s + p.x, 0) / this.fixationPoints.length;
+      const cy = this.fixationPoints.reduce((s, p) => s + p.y, 0) / this.fixationPoints.length;
+      this.fixationCentre = { x: cx, y: cy };
+    } else if (event === 'saccade') {
+      this.fixationCentre = null;
+      this.fixationPoints = [{ x: filtered.x, y: filtered.y, time: now }];
+    }
+
+    this.event = event;
+
+    // --- Optional grid snap ---------------------------------------------------
+    let finalX = filtered.x;
+    let finalY = filtered.y;
     let isSnapped = false;
 
-    if (this.settings.snapToGrid && this.isFixating) {
+    if (this.settings.snapToGrid && event === 'fixation') {
       const gridSize = this.settings.gridSnapSize || 40;
-      const snapX = Math.round(this.filteredScreenX / gridSize) * gridSize;
-      const snapY = Math.round(this.filteredScreenY / gridSize) * gridSize;
-
-      finalScreenX = snapX;
-      finalScreenY = snapY;
+      finalX = Math.round(filtered.x / gridSize) * gridSize;
+      finalY = Math.round(filtered.y / gridSize) * gridSize;
       isSnapped = true;
 
-      if (!this.lastSnappedTarget || this.lastSnappedTarget.x !== snapX || this.lastSnappedTarget.y !== snapY) {
-        this.lastSnappedTarget = { x: snapX, y: snapY };
+      if (!this.lastSnappedTarget || this.lastSnappedTarget.x !== finalX || this.lastSnappedTarget.y !== finalY) {
+        this.lastSnappedTarget = { x: finalX, y: finalY };
         soundEngine.playGridSnapTick();
       }
     } else {
       this.lastSnappedTarget = null;
     }
 
-    const gazeState: GazeState = {
-      screenX: finalScreenX,
-      screenY: finalScreenY,
-      normX: Math.max(0, Math.min(1, finalScreenX / scrW)),
-      normY: Math.max(0, Math.min(1, finalScreenY / scrH)),
-      rawX: this.filteredRawX,
-      rawY: this.filteredRawY,
-      snappedX: isSnapped ? finalScreenX : undefined,
-      snappedY: isSnapped ? finalScreenY : undefined,
-      isSnapped,
-      isBlinkingLeft,
-      isBlinkingRight,
-      isBlinkingBoth,
-      blinkCount: this.blinkCount,
-      isFixating: this.isFixating,
-      confidence: Math.max(0.6, 1 - (blinkLeftScore + blinkRightScore) * 0.4),
+    const gaze = this.buildGazeState({
+      screen: { x: finalX, y: finalY },
+      feature: filteredFeature,
       headPose,
-      timestamp: now,
-    };
+      confidence,
+      isHeld,
+      blinkingLeft: features.isBlinkingLeft,
+      blinkingRight: features.isBlinkingRight,
+      event,
+      now,
+      isSnapped,
+    });
 
-    this.callbacks.onGazeUpdate?.(gazeState);
+    // The sink sees every frame, usable or not, so calibration screens can
+    // report an honest "eyes found" percentage rather than one computed only
+    // from the frames that already succeeded.
+    if (this.sampleCollector) {
+      this.sampleCollector(
+        {
+          gx: filteredFeature.x,
+          gy: filteredFeature.y,
+          headYaw: headPose.yaw,
+          headPitch: headPose.pitch,
+          headTranslateX: headPose.translateX,
+          headTranslateY: headPose.translateY,
+          quality: confidence,
+        },
+        gaze,
+        usableForCalibration
+      );
+    }
+
+    gazeBus.publish(gaze);
   }
 
-  // Fallback simulator for mouse/touch
-  public simulateGazeFromPointer(clientX: number, clientY: number) {
+  private buildGazeState(args: {
+    screen: Point2D;
+    feature: Point2D;
+    headPose: HeadPose | null;
+    confidence: number;
+    isHeld: boolean;
+    blinkingLeft: boolean;
+    blinkingRight: boolean;
+    event: OcularEvent;
+    now: number;
+    isSnapped?: boolean;
+  }): GazeState {
     const scrW = window.innerWidth;
     const scrH = window.innerHeight;
-    const normX = clientX / scrW;
-    const normY = clientY / scrH;
 
-    this.filteredScreenX = clientX;
-    this.filteredScreenY = clientY;
-
-    const gazeState: GazeState = {
-      screenX: clientX,
-      screenY: clientY,
-      normX,
-      normY,
-      rawX: normX - 0.5,
-      rawY: normY - 0.5,
-      isBlinkingLeft: false,
-      isBlinkingRight: false,
-      isBlinkingBoth: false,
+    return {
+      screenX: args.screen.x,
+      screenY: args.screen.y,
+      normX: Math.max(0, Math.min(1, args.screen.x / scrW)),
+      normY: Math.max(0, Math.min(1, args.screen.y / scrH)),
+      gx: args.feature.x,
+      gy: args.feature.y,
+      snappedX: args.isSnapped ? args.screen.x : undefined,
+      snappedY: args.isSnapped ? args.screen.y : undefined,
+      isSnapped: args.isSnapped,
+      isBlinkingLeft: args.blinkingLeft,
+      isBlinkingRight: args.blinkingRight,
+      isBlinkingBoth: args.blinkingLeft && args.blinkingRight,
       blinkCount: this.blinkCount,
-      isFixating: true,
-      confidence: 1.0,
-      headPose: { pitch: 0, yaw: 0, roll: 0 },
-      timestamp: Date.now(),
+      event: args.event,
+      isFixating: args.event === 'fixation',
+      velocityDegPerSec: this.velocityDegPerSec,
+      fixationCentre: this.fixationCentre ?? undefined,
+      fixationDurationMs: args.event === 'fixation' ? args.now - this.fixationStart : 0,
+      confidence: args.confidence,
+      isHeld: args.isHeld,
+      headPose:
+        args.headPose ?? {
+          yaw: 0,
+          pitch: 0,
+          roll: 0,
+          translateX: 0,
+          translateY: 0,
+          distanceCm: null,
+          interocularSpan: 0,
+        },
+      timestamp: args.now,
+    };
+  }
+
+  /** Mouse fallback, so the whole app remains usable without a camera. */
+  public simulateGazeFromPointer(clientX: number, clientY: number) {
+    this.simulatedPointer = true;
+    const now = Date.now();
+    const dtSec = this.lastSampleTime > 0 ? Math.max(0.008, (now - this.lastSampleTime) / 1000) : 0.033;
+    this.lastSampleTime = now;
+
+    const travelDeg = viewingGeometry.pixelsToDegrees(
+      Math.hypot(clientX - this.lastScreen.x, clientY - this.lastScreen.y)
+    );
+    this.velocityDegPerSec = this.velocityDegPerSec * 0.6 + (travelDeg / dtSec) * 0.4;
+    this.prevVelocityPoint = { x: clientX, y: clientY };
+
+    const event: OcularEvent =
+      this.velocityDegPerSec > this.settings.saccadeVelocityThreshold ? 'saccade' : 'fixation';
+
+    if (event === 'fixation') {
+      if (this.event !== 'fixation') {
+        this.fixationStart = now;
+        this.fixationPoints = [];
+      }
+      this.fixationPoints.push({ x: clientX, y: clientY, time: now });
+      if (this.fixationPoints.length > 120) this.fixationPoints.shift();
+      this.fixationCentre = {
+        x: this.fixationPoints.reduce((s, p) => s + p.x, 0) / this.fixationPoints.length,
+        y: this.fixationPoints.reduce((s, p) => s + p.y, 0) / this.fixationPoints.length,
+      };
+    } else {
+      this.fixationCentre = null;
+      this.fixationPoints = [{ x: clientX, y: clientY, time: now }];
+    }
+    this.event = event;
+
+    this.lastScreen = { x: clientX, y: clientY };
+    this.lastGoodScreen = this.lastScreen;
+
+    const headPose: HeadPose = {
+      yaw: 0,
+      pitch: 0,
+      roll: 0,
+      translateX: 0,
+      translateY: 0,
+      distanceCm: viewingGeometry.getSettings().assumedDistanceCm,
+      interocularSpan: 0.1,
     };
 
-    this.callbacks.onGazeUpdate?.(gazeState);
+    const gaze = this.buildGazeState({
+      screen: this.lastScreen,
+      feature: { x: (clientX / window.innerWidth - 0.5) * 0.2, y: (clientY / window.innerHeight - 0.5) * 0.2 },
+      headPose,
+      confidence: 1,
+      isHeld: false,
+      blinkingLeft: false,
+      blinkingRight: false,
+      event,
+      now,
+    });
+
+    if (this.sampleCollector) {
+      this.sampleCollector(
+        {
+          gx: gaze.gx,
+          gy: gaze.gy,
+          headYaw: 0,
+          headPitch: 0,
+          headTranslateX: 0,
+          headTranslateY: 0,
+          quality: 1,
+        },
+        gaze,
+        true
+      );
+    }
+
+    gazeBus.publish(gaze);
+  }
+
+  public setSimulatedPointer(enabled: boolean) {
+    this.simulatedPointer = enabled;
   }
 
   public dispose() {
+    this.disposed = true;
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
@@ -501,15 +664,16 @@ export class FaceMeshTracker {
       this.stream.getTracks().forEach(track => track.stop());
       this.stream = null;
     }
-    if (this.videoElement && this.videoElement.parentNode) {
+    if (this.videoElement?.parentNode) {
       this.videoElement.parentNode.removeChild(this.videoElement);
-      this.videoElement = null;
     }
+    this.videoElement = null;
     if (this.faceLandmarker) {
       this.faceLandmarker.close();
       this.faceLandmarker = null;
     }
-    this.screenOneEuroFilter.reset();
-    this.rawOneEuroFilter.reset();
+    this.featureFilter.reset();
+    this.screenFilter.reset();
+    gazeBus.clear();
   }
 }

@@ -1,321 +1,306 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Compass, RotateCcw, Trophy, ShieldAlert, Award } from 'lucide-react';
-import { GazeState, Point2D } from '../../types';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Play, RotateCcw } from 'lucide-react';
+import { Point2D } from '../../types';
+import { gazeBus } from '../../services/gazeBus';
 import { soundEngine } from '../../services/audio';
-import confetti from 'canvas-confetti';
+import { viewingGeometry } from '../../services/viewingGeometry';
 
-interface GazeMazeTaskProps {
-  gaze: GazeState | null;
-}
-
-interface MazePath {
-  start: Point2D;
-  end: Point2D;
+interface MazeLevel {
+  id: string;
+  name: string;
+  note: string;
   waypoints: Point2D[];
   corridorWidth: number;
 }
 
-const MAZE_LEVELS: { id: string; name: string; difficulty: string; path: MazePath }[] = [
+const LEVELS: MazeLevel[] = [
   {
-    id: 'river-glide',
-    name: 'Serpentine River',
-    difficulty: 'Novice',
-    path: {
-      start: { x: 12, y: 50 },
-      end: { x: 88, y: 50 },
-      waypoints: [
-        { x: 12, y: 50 },
-        { x: 28, y: 25 },
-        { x: 50, y: 75 },
-        { x: 72, y: 25 },
-        { x: 88, y: 50 },
-      ],
-      corridorWidth: 90,
-    },
+    id: 'wave',
+    name: 'Wave',
+    note: 'A wide, gentle path. Follow it slowly.',
+    waypoints: [
+      { x: 10, y: 50 },
+      { x: 30, y: 28 },
+      { x: 50, y: 72 },
+      { x: 70, y: 28 },
+      { x: 90, y: 50 },
+    ],
+    corridorWidth: 96,
   },
   {
-    id: 'spiral-zen',
-    name: 'Cosmic Vortex',
-    difficulty: 'Adept',
-    path: {
-      start: { x: 15, y: 20 },
-      end: { x: 85, y: 80 },
-      waypoints: [
-        { x: 15, y: 20 },
-        { x: 80, y: 20 },
-        { x: 80, y: 50 },
-        { x: 25, y: 50 },
-        { x: 25, y: 80 },
-        { x: 85, y: 80 },
-      ],
-      corridorWidth: 75,
-    },
+    id: 'switchback',
+    name: 'Switchback',
+    note: 'Sharp turns. Slow down before each corner.',
+    waypoints: [
+      { x: 12, y: 20 },
+      { x: 82, y: 20 },
+      { x: 82, y: 50 },
+      { x: 18, y: 50 },
+      { x: 18, y: 80 },
+      { x: 88, y: 80 },
+    ],
+    corridorWidth: 74,
+  },
+  {
+    id: 'narrows',
+    name: 'Narrows',
+    note: 'A narrow corridor. This one needs a good calibration.',
+    waypoints: [
+      { x: 10, y: 70 },
+      { x: 32, y: 30 },
+      { x: 54, y: 70 },
+      { x: 76, y: 30 },
+      { x: 92, y: 60 },
+    ],
+    corridorWidth: 52,
   },
 ];
 
-export const GazeMazeTask: React.FC<GazeMazeTaskProps> = ({ gaze }) => {
-  const [levelIdx, setLevelIdx] = useState(0);
-  const [mazeStroke, setMazeStroke] = useState<Point2D[]>([]);
-  const [gameState, setGameState] = useState<'idle' | 'running' | 'failed' | 'victory'>('idle');
-  const [offCourseCount, setOffCourseCount] = useState(0);
-  const [progressPercent, setProgressPercent] = useState(0);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+function distanceToPath(p: Point2D, waypoints: Point2D[]): { distance: number; progress: number } {
+  let best = Infinity;
+  let bestProgress = 0;
+  let travelled = 0;
 
-  const currentLevel = MAZE_LEVELS[levelIdx];
+  const lengths = waypoints.slice(1).map((w, i) => Math.hypot(w.x - waypoints[i].x, w.y - waypoints[i].y));
+  const total = lengths.reduce((a, b) => a + b, 0) || 1;
 
-  const resetGame = () => {
-    setMazeStroke([]);
-    setGameState('idle');
-    setOffCourseCount(0);
-    setProgressPercent(0);
-    soundEngine.playChime(400, 0.2);
-  };
-
-  useEffect(() => {
-    resetGame();
-  }, [levelIdx]);
-
-  // Distance from point to line segment
-  const distToSegment = (p: Point2D, v: Point2D, w: Point2D) => {
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const v = waypoints[i];
+    const w = waypoints[i + 1];
     const l2 = (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
-    if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
-    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
-    t = Math.max(0, Math.min(1, t));
-    return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
-  };
+    const t = l2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2));
+    const projX = v.x + t * (w.x - v.x);
+    const projY = v.y + t * (w.y - v.y);
+    const distance = Math.hypot(p.x - projX, p.y - projY);
 
-  // Main maze loop
+    if (distance < best) {
+      best = distance;
+      bestProgress = (travelled + t * lengths[i]) / total;
+    }
+    travelled += lengths[i];
+  }
+
+  return { distance: best, progress: bestProgress };
+}
+
+/**
+ * Follow the path.
+ *
+ * A smooth-pursuit and path-following task. Straying is not a failure state —
+ * being thrown back to the start after a wobble is discouraging and, for a
+ * client working on control, counterproductive. Instead the run records how
+ * much of the time the gaze stayed within the corridor and the average
+ * deviation in degrees, so improvement is visible even when the run is messy.
+ */
+export const GazeMazeTask: React.FC = () => {
+  const [levelIndex, setLevelIndex] = useState(0);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [onPathPercent, setOnPathPercent] = useState(100);
+  const [meanDeviationDeg, setMeanDeviationDeg] = useState(0);
+  const [complete, setComplete] = useState(false);
+
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const trailRef = useRef<Point2D[]>([]);
+  const statsRef = useRef({ samples: 0, onPath: 0, deviationSum: 0, maxProgress: 0 });
+  const runningRef = useRef(false);
+  runningRef.current = running;
+  const levelRef = useRef(LEVELS[levelIndex]);
+  levelRef.current = LEVELS[levelIndex];
+
+  const level = LEVELS[levelIndex];
+
+  const reset = useCallback(() => {
+    trailRef.current = [];
+    statsRef.current = { samples: 0, onPath: 0, deviationSum: 0, maxProgress: 0 };
+    setProgress(0);
+    setOnPathPercent(100);
+    setMeanDeviationDeg(0);
+    setComplete(false);
+    setRunning(false);
+  }, []);
+
   useEffect(() => {
-    if (!gaze || gameState === 'failed' || gameState === 'victory') return;
+    reset();
+  }, [levelIndex, reset]);
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const gx = gaze.screenX - rect.left;
-    const gy = gaze.screenY - rect.top;
-
-    if (gx < 0 || gx > rect.width || gy < 0 || gy > rect.height) return;
-
-    const w = rect.width;
-    const h = rect.height;
-    const currentPt: Point2D = { x: gx, y: gy };
-
-    const startPx: Point2D = {
-      x: (currentLevel.path.start.x / 100) * w,
-      y: (currentLevel.path.start.y / 100) * h,
-    };
-    const endPx: Point2D = {
-      x: (currentLevel.path.end.x / 100) * w,
-      y: (currentLevel.path.end.y / 100) * h,
-    };
-
-    // Check Start Portal
-    if (gameState === 'idle') {
-      if (Math.hypot(gx - startPx.x, gy - startPx.y) < 55) {
-        setGameState('running');
-        setMazeStroke([currentPt]);
-        soundEngine.playChime(523, 0.3);
-      }
-      return;
-    }
-
-    if (gameState === 'running') {
-      setMazeStroke(prev => [...prev.slice(-300), currentPt]);
-
-      // Check distance to any waypoint segment
-      const pts = currentLevel.path.waypoints.map(wp => ({
-        x: (wp.x / 100) * w,
-        y: (wp.y / 100) * h,
-      }));
-
-      let minDist = Infinity;
-      for (let i = 0; i < pts.length - 1; i++) {
-        const d = distToSegment(currentPt, pts[i], pts[i + 1]);
-        minDist = Math.min(minDist, d);
-      }
-
-      // Check boundary breach
-      if (minDist > currentLevel.path.corridorWidth / 2) {
-        setOffCourseCount(c => c + 1);
-        soundEngine.playChime(150, 0.15, 'sawtooth');
-      }
-
-      // Check distance to End Portal
-      const distToEnd = Math.hypot(gx - endPx.x, gy - endPx.y);
-      if (distToEnd < 50) {
-        setGameState('victory');
-        soundEngine.playLevelComplete();
-        try {
-          confetti({
-            particleCount: 70,
-            spread: 70,
-            origin: { y: 0.5 },
-          });
-        } catch {}
-      }
-    }
-  }, [gaze, gameState, currentLevel]);
-
-  // Render Maze Canvas
+  // Sampling and drawing both live in one animation frame loop, reading gaze
+  // from a ref, so the run does not re-render React sixty times a second.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    canvas.width = canvas.parentElement?.clientWidth || 800;
-    canvas.height = canvas.parentElement?.clientHeight || 600;
+    let latest: { x: number; y: number } | null = null;
+    const unsubscribe = gazeBus.subscribe(g => {
+      latest = { x: g.screenX, y: g.screenY };
+    });
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+    resize();
+    window.addEventListener('resize', resize);
 
-    const w = canvas.width;
-    const h = canvas.height;
-    const wp = currentLevel.path.waypoints.map(p => ({
-      x: (p.x / 100) * w,
-      y: (p.y / 100) * h,
-    }));
+    let frame = 0;
+    let uiTick = 0;
 
-    // Draw Path Corridor (Safe Zone)
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(wp[0].x, wp[0].y);
-    for (let i = 1; i < wp.length; i++) {
-      ctx.lineTo(wp[i].x, wp[i].y);
-    }
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = currentLevel.path.corridorWidth;
-    ctx.strokeStyle = 'rgba(30, 41, 59, 0.7)';
-    ctx.stroke();
+    const render = () => {
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
+      const current = levelRef.current;
 
-    // Corridor Boundaries Glow
-    ctx.lineWidth = currentLevel.path.corridorWidth + 4;
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.2)';
-    ctx.stroke();
+      ctx.clearRect(0, 0, w, h);
 
-    // Center Guide dashed line
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8, 8]);
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.3)';
-    ctx.stroke();
-    ctx.setLineDash([]);
+      const toPx = (p: Point2D) => ({ x: (p.x / 100) * w, y: (p.y / 100) * h });
 
-    // Draw active user gaze trace
-    if (mazeStroke.length > 1) {
+      // Corridor.
       ctx.beginPath();
-      ctx.moveTo(mazeStroke[0].x, mazeStroke[0].y);
-      for (let i = 1; i < mazeStroke.length; i++) {
-        ctx.lineTo(mazeStroke[i].x, mazeStroke[i].y);
-      }
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = offCourseCount > 15 ? '#f43f5e' : '#38bdf8';
-      ctx.shadowColor = '#0284c7';
-      ctx.shadowBlur = 12;
+      current.waypoints.forEach((p, i) => {
+        const q = toPx(p);
+        if (i === 0) ctx.moveTo(q.x, q.y);
+        else ctx.lineTo(q.x, q.y);
+      });
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(143, 188, 175, 0.22)';
+      ctx.lineWidth = current.corridorWidth;
       ctx.stroke();
-    }
 
-    ctx.restore();
-  }, [mazeStroke, currentLevel, offCourseCount]);
+      ctx.strokeStyle = 'rgba(78, 135, 121, 0.35)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 8]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Start and finish.
+      const start = toPx(current.waypoints[0]);
+      const end = toPx(current.waypoints[current.waypoints.length - 1]);
+      ctx.fillStyle = 'rgba(78, 135, 121, 0.9)';
+      ctx.beginPath();
+      ctx.arc(start.x, start.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(181, 113, 79, 0.9)';
+      ctx.beginPath();
+      ctx.arc(end.x, end.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (runningRef.current && latest) {
+        const local = { x: latest.x - rect.left, y: latest.y - rect.top };
+        if (local.x >= 0 && local.x <= w && local.y >= 0 && local.y <= h) {
+          const percentPoint = { x: (local.x / w) * 100, y: (local.y / h) * 100 };
+          const { distance, progress: pathProgress } = distanceToPath(percentPoint, current.waypoints);
+
+          // Percentage-space distance is converted back to pixels along the
+          // shorter axis, which keeps the corridor test aspect-ratio sane.
+          const distancePx = (distance / 100) * Math.min(w, h);
+          const stats = statsRef.current;
+          stats.samples++;
+          stats.deviationSum += distancePx;
+          if (distancePx <= current.corridorWidth / 2) stats.onPath++;
+          stats.maxProgress = Math.max(stats.maxProgress, pathProgress);
+
+          trailRef.current.push(local);
+          if (trailRef.current.length > 400) trailRef.current.shift();
+
+          if (stats.maxProgress > 0.985 && !complete) {
+            setComplete(true);
+            setRunning(false);
+            soundEngine.playLevelComplete();
+          }
+        }
+      }
+
+      if (trailRef.current.length > 1) {
+        ctx.beginPath();
+        trailRef.current.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+        ctx.strokeStyle = 'rgba(63, 109, 98, 0.75)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+
+      // Push numbers to React a few times a second, not every frame.
+      uiTick++;
+      if (uiTick % 12 === 0) {
+        const stats = statsRef.current;
+        setProgress(stats.maxProgress);
+        if (stats.samples > 0) {
+          setOnPathPercent((stats.onPath / stats.samples) * 100);
+          setMeanDeviationDeg(viewingGeometry.pixelsToDegrees(stats.deviationSum / stats.samples));
+        }
+      }
+
+      frame = requestAnimationFrame(render);
+    };
+
+    frame = requestAnimationFrame(render);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('resize', resize);
+      unsubscribe();
+    };
+  }, [complete]);
 
   return (
-    <div id="gaze-maze-view" className="relative w-full h-full flex flex-col bg-slate-950 select-none overflow-hidden">
-      {/* Top Controls */}
-      <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-auto">
-        <div className="bg-slate-900/90 border border-slate-800/90 backdrop-blur-xl px-5 py-2.5 rounded-2xl shadow-xl">
-          <div className="flex items-center gap-2">
-            <Compass className="w-4 h-4 text-cyan-400" />
-            <h3 className="text-sm font-bold font-['Outfit'] text-white">
-              {currentLevel.name}
-            </h3>
-            <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-300 font-mono">
-              {currentLevel.difficulty}
-            </span>
-          </div>
-          <p className="text-xs text-slate-400 mt-0.5">
-            {gameState === 'idle'
-              ? 'Focus on START circle to begin'
-              : 'Guide your continuous eye gaze thread to the GOAL portal'}
-          </p>
-        </div>
+    <div className="absolute inset-0 overflow-hidden">
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
 
-        <div className="flex items-center gap-2">
+      <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 surface rounded-full px-2 py-1.5">
+        {LEVELS.map((l, i) => (
           <button
-            id="reset-maze-btn"
-            onClick={resetGame}
-            className="p-2.5 bg-slate-900/90 border border-slate-800 rounded-xl text-slate-400 hover:text-white transition-colors cursor-pointer"
-            title="Restart Maze"
+            key={l.id}
+            onClick={() => setLevelIndex(i)}
+            className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+              levelIndex === i ? 'bg-sage-100 text-sage-700' : 'text-ink-soft hover:text-ink'
+            }`}
           >
-            <RotateCcw className="w-4 h-4" />
+            {l.name}
           </button>
-          <button
-            id="next-maze-level-btn"
-            onClick={() => setLevelIdx((levelIdx + 1) % MAZE_LEVELS.length)}
-            className="px-3.5 py-2 bg-slate-900/90 border border-slate-800 hover:border-cyan-500/50 rounded-xl text-xs font-semibold text-slate-200 hover:text-white transition-all cursor-pointer"
-          >
-            Next Track
-          </button>
-        </div>
+        ))}
       </div>
 
-      {/* Canvas */}
-      <div className="relative flex-1 w-full h-full">
-        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+      <p className="absolute top-20 left-1/2 -translate-x-1/2 text-sm text-ink-faint">{level.note}</p>
 
-        {/* Start Node */}
-        <div
-          className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none"
-          style={{ left: `${currentLevel.path.start.x}%`, top: `${currentLevel.path.start.y}%` }}
-        >
-          <div className="w-16 h-16 rounded-full bg-emerald-500/20 border-2 border-emerald-400 flex flex-col items-center justify-center text-emerald-300 shadow-[0_0_20px_#10b981] animate-pulse">
-            <span className="text-[11px] font-bold tracking-wider">START</span>
-          </div>
+      <div className="absolute bottom-5 left-1/2 -translate-x-1/2 surface rounded-2xl px-5 py-3 flex items-center gap-6">
+        <div className="text-center">
+          <p className="text-xs text-ink-faint">Along the path</p>
+          <p className="text-lg font-semibold text-ink tabular-nums">{Math.round(progress * 100)}%</p>
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-ink-faint">Stayed in the corridor</p>
+          <p className="text-lg font-semibold text-ink tabular-nums">{Math.round(onPathPercent)}%</p>
+        </div>
+        <div className="text-center">
+          <p className="text-xs text-ink-faint">Average drift</p>
+          <p className="text-lg font-semibold text-ink tabular-nums">{meanDeviationDeg.toFixed(1)}°</p>
         </div>
 
-        {/* End / Goal Node */}
-        <div
-          className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none"
-          style={{ left: `${currentLevel.path.end.x}%`, top: `${currentLevel.path.end.y}%` }}
-        >
-          <div className="w-16 h-16 rounded-full bg-purple-500/20 border-2 border-purple-400 flex flex-col items-center justify-center text-purple-300 shadow-[0_0_20px_#a855f7] animate-pulse">
-            <Trophy className="w-4 h-4 mb-0.5" />
-            <span className="text-[10px] font-bold tracking-wider">GOAL</span>
-          </div>
-        </div>
-
-        {/* Victory Dialog */}
-        {gameState === 'victory' && (
-          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-6 z-30 animate-in fade-in zoom-in-95">
-            <div className="bg-slate-900 border border-emerald-500/30 rounded-3xl p-8 max-w-sm text-center shadow-2xl space-y-5">
-              <div className="w-16 h-16 rounded-2xl bg-emerald-500/20 border border-emerald-400 flex items-center justify-center mx-auto text-emerald-300 shadow-[0_0_30px_rgba(16,185,129,0.4)]">
-                <Award className="w-8 h-8" />
-              </div>
-              <div>
-                <h4 className="text-xl font-bold font-['Outfit'] text-white">
-                  Labyrinth Conquered!
-                </h4>
-                <p className="text-xs text-slate-300 mt-1">
-                  Remarkable gaze motor precision! You traversed {currentLevel.name} without losing path stability.
-                </p>
-              </div>
-
-              <div className="flex gap-3">
-                <button
-                  id="replay-maze-btn"
-                  onClick={resetGame}
-                  className="flex-1 py-2.5 px-4 rounded-xl border border-slate-700 text-xs font-semibold text-slate-300 hover:bg-slate-800 transition-colors cursor-pointer"
-                >
-                  Replay
-                </button>
-                <button
-                  id="advance-maze-btn"
-                  onClick={() => setLevelIdx((levelIdx + 1) % MAZE_LEVELS.length)}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-xs font-semibold text-white shadow-lg shadow-cyan-500/25 transition-all cursor-pointer"
-                >
-                  Next Maze
-                </button>
-              </div>
-            </div>
-          </div>
+        {complete ? (
+          <span className="px-4 py-2 rounded-xl bg-sage-100 text-sage-700 text-sm font-medium">Finished</span>
+        ) : (
+          <button
+            onClick={() => {
+              if (running) {
+                reset();
+              } else {
+                trailRef.current = [];
+                statsRef.current = { samples: 0, onPath: 0, deviationSum: 0, maxProgress: 0 };
+                setComplete(false);
+                setRunning(true);
+                soundEngine.playChime(520, 0.15);
+              }
+            }}
+            className="px-4 py-2 rounded-xl bg-sage-500 hover:bg-sage-600 text-white text-sm font-medium flex items-center gap-2 transition-colors"
+          >
+            {running ? <RotateCcw className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            {running ? 'Restart' : 'Start'}
+          </button>
         )}
       </div>
     </div>

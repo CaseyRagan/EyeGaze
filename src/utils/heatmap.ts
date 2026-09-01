@@ -9,205 +9,182 @@ export interface HeatmapHotspot {
   x: number;
   y: number;
   density: number;
-  regionName: string;
 }
 
+const MAX_POINTS = 2500;
+
+/**
+ * Accumulates where the gaze has spent its time and paints it as a soft
+ * density map.
+ *
+ * The colourised bitmap is rebuilt only when new points have arrived, not on
+ * every frame. Recolouring means reading and rewriting every pixel of a
+ * full-screen canvas, which at 1920×1080 is over eight million array
+ * operations — fine a few times a second, ruinous at sixty.
+ */
 export class HeatmapRenderer {
-  private shadowCanvas: HTMLCanvasElement;
-  private shadowCtx: CanvasRenderingContext2D | null;
-  private colorCanvas: HTMLCanvasElement;
-  private colorCtx: CanvasRenderingContext2D | null;
-  private colorGradient: Uint8ClampedArray | null = null;
+  private densityCanvas: HTMLCanvasElement;
+  private densityCtx: CanvasRenderingContext2D | null;
+  private colourCanvas: HTMLCanvasElement;
+  private colourCtx: CanvasRenderingContext2D | null;
+  private gradient: Uint8ClampedArray | null = null;
   private points: HeatmapPoint[] = [];
-  private maxDensity = 1;
-  private radius = 45;
-  private opacity = 0.75;
+  private radius = 46;
+  private opacity = 0.72;
   private width = 0;
   private height = 0;
+  private dirty = true;
 
   constructor() {
-    this.shadowCanvas = document.createElement('canvas');
-    this.shadowCtx = this.shadowCanvas.getContext('2d', { willReadFrequently: true });
-    this.colorCanvas = document.createElement('canvas');
-    this.colorCtx = this.colorCanvas.getContext('2d');
-    this.initColorGradient();
+    this.densityCanvas = document.createElement('canvas');
+    this.densityCtx = this.densityCanvas.getContext('2d', { willReadFrequently: true });
+    this.colourCanvas = document.createElement('canvas');
+    this.colourCtx = this.colourCanvas.getContext('2d');
+    this.buildGradient();
   }
 
-  private initColorGradient() {
-    const paletteCanvas = document.createElement('canvas');
-    paletteCanvas.width = 256;
-    paletteCanvas.height = 1;
-    const pCtx = paletteCanvas.getContext('2d');
-    if (!pCtx) return;
+  private buildGradient() {
+    const palette = document.createElement('canvas');
+    palette.width = 256;
+    palette.height = 1;
+    const ctx = palette.getContext('2d');
+    if (!ctx) return;
 
-    // Heatmap gradient spectrum: Deep Obsidian/Indigo -> Cyan -> Emerald -> Solar Gold -> Hot Coral -> White Peak
-    const grad = pCtx.createLinearGradient(0, 0, 256, 0);
-    grad.addColorStop(0.0, 'rgba(0, 0, 0, 0)');
-    grad.addColorStop(0.12, 'rgba(6, 182, 212, 0.25)'); // Cyan
-    grad.addColorStop(0.30, 'rgba(16, 185, 129, 0.55)'); // Emerald
-    grad.addColorStop(0.55, 'rgba(234, 179, 8, 0.75)'); // Amber / Gold
-    grad.addColorStop(0.80, 'rgba(239, 68, 68, 0.90)'); // Hot Crimson
-    grad.addColorStop(1.0, 'rgba(255, 255, 255, 1.0)'); // White Core
+    // Warm, low-saturation ramp: pale sage through honey to clay. Deliberately
+    // avoids the rainbow scale, which exaggerates differences that are not
+    // there and is unreadable for anyone with a red-green colour deficiency.
+    const grad = ctx.createLinearGradient(0, 0, 256, 0);
+    grad.addColorStop(0.0, 'rgba(255, 255, 255, 0)');
+    grad.addColorStop(0.2, 'rgba(185, 215, 206, 0.35)');
+    grad.addColorStop(0.45, 'rgba(143, 188, 175, 0.6)');
+    grad.addColorStop(0.68, 'rgba(237, 203, 132, 0.78)');
+    grad.addColorStop(0.86, 'rgba(204, 143, 110, 0.88)');
+    grad.addColorStop(1.0, 'rgba(181, 113, 79, 0.95)');
 
-    pCtx.fillStyle = grad;
-    pCtx.fillRect(0, 0, 256, 1);
-    this.colorGradient = pCtx.getImageData(0, 0, 256, 1).data;
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 256, 1);
+    this.gradient = ctx.getImageData(0, 0, 256, 1).data;
   }
 
   public resize(width: number, height: number) {
-    if (this.width === width && this.height === height) return;
-    this.width = width;
-    this.height = height;
-    this.shadowCanvas.width = width;
-    this.shadowCanvas.height = height;
-    this.colorCanvas.width = width;
-    this.colorCanvas.height = height;
-    this.redrawAllPoints();
+    const w = Math.max(1, Math.floor(width));
+    const h = Math.max(1, Math.floor(height));
+    if (this.width === w && this.height === h) return;
+    this.width = w;
+    this.height = h;
+    this.densityCanvas.width = w;
+    this.densityCanvas.height = h;
+    this.colourCanvas.width = w;
+    this.colourCanvas.height = h;
+    this.redrawAll();
   }
 
   public setRadius(r: number) {
-    this.radius = Math.max(15, Math.min(100, r));
-    this.redrawAllPoints();
+    this.radius = Math.max(15, Math.min(120, r));
+    this.redrawAll();
   }
 
-  public setOpacity(op: number) {
-    this.opacity = Math.max(0.1, Math.min(1.0, op));
+  public setOpacity(value: number) {
+    this.opacity = Math.max(0.1, Math.min(1, value));
+    this.dirty = true;
   }
 
   public getPointCount(): number {
     return this.points.length;
   }
 
-  public addPoint(x: number, y: number, isFixating: boolean = false) {
+  public addPoint(x: number, y: number, isFixating = false) {
     if (x < 0 || x > this.width || y < 0 || y > this.height) return;
 
-    const weight = isFixating ? 2.2 : 1.0;
+    // Fixations count for more than transit: time spent looking is the signal,
+    // and a saccade passing over a spot is not the same as dwelling on it.
+    const weight = isFixating ? 2.2 : 1;
     const now = Date.now();
 
-    // Prevent identical point spam in a tight loop (< 6px within 40ms)
-    if (this.points.length > 0) {
-      const last = this.points[this.points.length - 1];
-      if (now - last.time < 35 && Math.hypot(x - last.x, y - last.y) < 6) {
-        last.weight += weight * 0.4;
-        this.renderSinglePoint(last.x, last.y, weight * 0.4);
-        return;
-      }
+    const last = this.points[this.points.length - 1];
+    if (last && now - last.time < 35 && Math.hypot(x - last.x, y - last.y) < 6) {
+      last.weight += weight * 0.4;
+      this.stampPoint(last.x, last.y, weight * 0.4);
+      this.dirty = true;
+      return;
     }
 
-    const pt: HeatmapPoint = { x, y, weight, time: now };
-    this.points.push(pt);
+    this.points.push({ x, y, weight, time: now });
+    if (this.points.length > MAX_POINTS) this.points.shift();
 
-    // Limit buffer to 2500 points for memory safety
-    if (this.points.length > 2500) {
-      this.points.shift();
-    }
-
-    this.renderSinglePoint(x, y, weight);
+    this.stampPoint(x, y, weight);
+    this.dirty = true;
   }
 
-  private renderSinglePoint(x: number, y: number, weight: number) {
-    if (!this.shadowCtx || this.width === 0 || this.height === 0) return;
+  private stampPoint(x: number, y: number, weight: number) {
+    if (!this.densityCtx || this.width === 0) return;
 
-    const r = this.radius;
-    const radGrad = this.shadowCtx.createRadialGradient(x, y, 0, x, y, r);
-    const alpha = Math.min(0.25, (weight * 0.08));
+    const alpha = Math.min(0.25, weight * 0.08);
+    const grad = this.densityCtx.createRadialGradient(x, y, 0, x, y, this.radius);
+    grad.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
+    grad.addColorStop(0.5, `rgba(0, 0, 0, ${alpha * 0.45})`);
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
 
-    radGrad.addColorStop(0, `rgba(0, 0, 0, ${alpha})`);
-    radGrad.addColorStop(0.5, `rgba(0, 0, 0, ${alpha * 0.45})`);
-    radGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-
-    this.shadowCtx.fillStyle = radGrad;
-    this.shadowCtx.beginPath();
-    this.shadowCtx.arc(x, y, r, 0, Math.PI * 2);
-    this.shadowCtx.fill();
+    this.densityCtx.fillStyle = grad;
+    this.densityCtx.beginPath();
+    this.densityCtx.arc(x, y, this.radius, 0, Math.PI * 2);
+    this.densityCtx.fill();
   }
 
-  private redrawAllPoints() {
-    if (!this.shadowCtx || this.width === 0 || this.height === 0) return;
-    this.shadowCtx.clearRect(0, 0, this.width, this.height);
-    for (let i = 0; i < this.points.length; i++) {
-      const p = this.points[i];
-      this.renderSinglePoint(p.x, p.y, p.weight);
-    }
+  private redrawAll() {
+    if (!this.densityCtx || this.width === 0) return;
+    this.densityCtx.clearRect(0, 0, this.width, this.height);
+    for (const p of this.points) this.stampPoint(p.x, p.y, p.weight);
+    this.dirty = true;
   }
 
   public clear() {
     this.points = [];
-    if (this.shadowCtx) {
-      this.shadowCtx.clearRect(0, 0, this.width, this.height);
-    }
+    this.densityCtx?.clearRect(0, 0, this.width, this.height);
+    this.colourCtx?.clearRect(0, 0, this.width, this.height);
+    this.dirty = false;
   }
 
+  /** The densest region, as a rough summary of where attention settled. */
   public getPeakHotspot(): HeatmapHotspot | null {
-    if (this.points.length === 0 || this.width === 0 || this.height === 0) return null;
+    if (this.points.length < 12) return null;
 
-    // Find center of mass / dense cluster using a coarse 6x6 spatial grid
-    const cols = 6;
-    const rows = 6;
-    const cellW = this.width / cols;
-    const cellH = this.height / rows;
-    const grid: number[][] = Array.from({ length: rows }, () => Array(cols).fill(0));
-
-    let maxVal = 0;
-    let maxR = 0;
-    let maxC = 0;
-
-    for (let i = 0; i < this.points.length; i++) {
-      const p = this.points[i];
-      const c = Math.min(cols - 1, Math.max(0, Math.floor(p.x / cellW)));
-      const r = Math.min(rows - 1, Math.max(0, Math.floor(p.y / cellH)));
-      grid[r][c] += p.weight;
-      if (grid[r][c] > maxVal) {
-        maxVal = grid[r][c];
-        maxR = r;
-        maxC = c;
+    let best: HeatmapHotspot | null = null;
+    for (const candidate of this.points) {
+      let density = 0;
+      for (const other of this.points) {
+        const d = Math.hypot(candidate.x - other.x, candidate.y - other.y);
+        if (d < this.radius) density += other.weight * (1 - d / this.radius);
       }
+      if (!best || density > best.density) best = { x: candidate.x, y: candidate.y, density };
     }
-
-    const centerX = (maxC + 0.5) * cellW;
-    const centerY = (maxR + 0.5) * cellH;
-
-    // Region description
-    const vName = maxR < 2 ? 'Top' : maxR > 3 ? 'Bottom' : 'Center';
-    const hName = maxC < 2 ? 'Left' : maxC > 3 ? 'Right' : 'Center';
-    const regionName = vName === 'Center' && hName === 'Center' ? 'Canvas Center' : `${vName}-${hName}`;
-
-    return {
-      x: Math.round(centerX),
-      y: Math.round(centerY),
-      density: maxVal,
-      regionName,
-    };
+    return best;
   }
 
+  /** Recolours if needed, then composites onto the target context. */
   public render(targetCtx: CanvasRenderingContext2D) {
-    if (!this.shadowCtx || !this.colorCtx || !this.colorGradient || this.width === 0 || this.height === 0) return;
+    if (!this.densityCtx || !this.colourCtx || !this.gradient || this.width === 0) return;
     if (this.points.length === 0) return;
 
-    // Get alpha data from shadow canvas
-    const imgData = this.shadowCtx.getImageData(0, 0, this.width, this.height);
-    const data = imgData.data;
-    const lut = this.colorGradient;
+    if (this.dirty) {
+      const image = this.densityCtx.getImageData(0, 0, this.width, this.height);
+      const data = image.data;
+      const lut = this.gradient;
 
-    // Transform alpha values to the spectral color palette
-    for (let i = 0; i < data.length; i += 4) {
-      const alpha = data[i + 3];
-      if (alpha > 0) {
-        // Look up color from gradient table
+      for (let i = 0; i < data.length; i += 4) {
+        const alpha = data[i + 3];
+        if (alpha === 0) continue;
         const lutIndex = alpha * 4;
-        data[i] = lut[lutIndex];         // R
-        data[i + 1] = lut[lutIndex + 1]; // G
-        data[i + 2] = lut[lutIndex + 2]; // B
-        data[i + 3] = Math.round(lut[lutIndex + 3] * this.opacity); // A
+        data[i] = lut[lutIndex];
+        data[i + 1] = lut[lutIndex + 1];
+        data[i + 2] = lut[lutIndex + 2];
+        data[i + 3] = Math.round(lut[lutIndex + 3] * this.opacity);
       }
+
+      this.colourCtx.putImageData(image, 0, 0);
+      this.dirty = false;
     }
 
-    this.colorCtx.putImageData(imgData, 0, 0);
-
-    // Draw onto destination target canvas
-    targetCtx.save();
-    targetCtx.globalAlpha = 1.0;
-    targetCtx.drawImage(this.colorCanvas, 0, 0);
-    targetCtx.restore();
+    targetCtx.drawImage(this.colourCanvas, 0, 0, this.width, this.height);
   }
 }

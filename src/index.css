@@ -1,32 +1,159 @@
 @import "tailwindcss";
 
+/**
+ * Design tokens.
+ *
+ * The palette is deliberately warm and low-contrast-noise: a linen ground,
+ * muted sage and clay accents, and ink rather than pure black. Nothing glows.
+ * People use this tool while concentrating hard on a screen, sometimes for
+ * twenty minutes at a stretch, sometimes after a head injury — a high-contrast
+ * neon interface is genuinely uncomfortable in that context, and it makes a
+ * therapy room feel like a laboratory.
+ */
+@theme {
+  --color-linen: #faf7f2;
+  --color-linen-deep: #f2ede4;
+  --color-paper: #ffffff;
+
+  --color-ink: #2c3230;
+  --color-ink-soft: #5a635f;
+  --color-ink-faint: #8b938f;
+
+  --color-sage-50: #f0f6f4;
+  --color-sage-100: #dcebe6;
+  --color-sage-200: #b9d7ce;
+  --color-sage-300: #8fbcaf;
+  --color-sage-400: #6aa294;
+  --color-sage-500: #4e8779;
+  --color-sage-600: #3f6d62;
+  --color-sage-700: #34564e;
+
+  --color-clay-100: #f8ece5;
+  --color-clay-200: #eed6c8;
+  --color-clay-300: #dfb49b;
+  --color-clay-400: #cc8f6e;
+  --color-clay-500: #b5714f;
+
+  --color-sky-100: #e6eff5;
+  --color-sky-300: #a5c5db;
+  --color-sky-500: #5b8fb0;
+
+  --color-honey-100: #fbf1dc;
+  --color-honey-300: #edcb84;
+  --color-honey-500: #c99a3c;
+
+  --font-sans: 'Figtree', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-reading: 'Lora', Georgia, 'Times New Roman', serif;
+}
+
+:root {
+  --surface: var(--color-linen);
+  --surface-raised: var(--color-paper);
+  --surface-sunken: var(--color-linen-deep);
+  --border-soft: rgba(44, 50, 48, 0.09);
+  --border-strong: rgba(44, 50, 48, 0.16);
+  --shadow-soft: 0 1px 2px rgba(44, 50, 48, 0.04), 0 6px 20px rgba(44, 50, 48, 0.06);
+  --shadow-lift: 0 2px 6px rgba(44, 50, 48, 0.06), 0 18px 40px rgba(44, 50, 48, 0.1);
+}
+
+/**
+ * A dimmed theme for darkened therapy rooms and for clients with photophobia.
+ * It is a low-light version of the same warm palette, not a neon inversion.
+ */
+html[data-theme='dim'] {
+  --color-linen: #23282a;
+  --color-linen-deep: #1b2022;
+  --color-paper: #2b3134;
+  --color-ink: #e8e6e1;
+  --color-ink-soft: #b0b6b4;
+  --color-ink-faint: #7d8583;
+  --surface: #23282a;
+  --surface-raised: #2b3134;
+  --surface-sunken: #1b2022;
+  --border-soft: rgba(232, 230, 225, 0.1);
+  --border-strong: rgba(232, 230, 225, 0.18);
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 20px rgba(0, 0, 0, 0.25);
+  --shadow-lift: 0 2px 6px rgba(0, 0, 0, 0.25), 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+html,
+body {
+  background: var(--surface);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
 @layer utilities {
-  .font-mono-tech {
-    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  .font-reading {
+    font-family: var(--font-reading);
   }
-  .font-serif-chic {
-    font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+  .surface {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-soft);
+    box-shadow: var(--shadow-soft);
+  }
+  .surface-quiet {
+    background: var(--surface-sunken);
+    border: 1px solid var(--border-soft);
+  }
+  .text-ink {
+    color: var(--color-ink);
+  }
+  .text-ink-soft {
+    color: var(--color-ink-soft);
+  }
+  .text-ink-faint {
+    color: var(--color-ink-faint);
+  }
+  .border-soft {
+    border-color: var(--border-soft);
+  }
+  .border-strong {
+    border-color: var(--border-strong);
+  }
+  .shadow-lift {
+    box-shadow: var(--shadow-lift);
   }
 }
 
-/* Custom subtle scrollbar */
+/* Focus rings stay visible: some users navigate this entirely by keyboard. */
+:focus-visible {
+  outline: 2px solid var(--color-sage-400);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: #080808;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262626;
-  border-radius: 3px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #404040;
-}
-
-/* Range input styling for sleek sliders */
-input[type=range] {
-  accent-color: #10b981;
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 
+input[type='range'] {
+  accent-color: var(--color-sage-500);
+  height: 22px;
+}
+
+/* Respect a stated preference for less motion — vestibular symptoms are common
+   in the populations this tool is built for. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
