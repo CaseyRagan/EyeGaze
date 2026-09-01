@@ -19,16 +19,20 @@ Nothing in the eye measurement can detect this on its own: the eye looks exactly
 the same whether you moved your head or moved your gaze. The mapping only knows
 because the head-position features tell it.
 
-**Mitigations in the app.** Head translation enters the regression as its own
-feature (`translateX`, `translateY` in `buildFeatureRow`), so the model can
-learn to compensate — but only to the extent the calibration data contains head
-variation, which for a still client is not much. So there is also a live posture
-monitor (`PostureGuide`) that reports drift from the calibrated position in
-centimetres, and a one-point drift correction (`RecentreOverlay`) that removes
-the constant part of the resulting error in about two seconds.
+**Mitigations in the app.** Head movement is undone in feature space, before the
+mapping, by `compensateForHead` in `calibration.ts`. This has to happen before
+the polynomial rather than as a correction after it: head movement shifts the
+measurement itself, so the observed feature is the one the client would have
+produced looking somewhere else entirely, and no additive correction downstream
+of a curved mapping can recover from that.
 
-**This is the term a head frame removes.** A chin or forehead rest is worth more
-than any remaining software change on this list.
+The compensation constants come from anatomy and camera geometry, so they work
+even for a client who held perfectly still during calibration. The
+head-movement pass then measures them for the individual — see below.
+
+There is also a live posture monitor (`PostureGuide`) reporting drift in
+centimetres, and a one-point drift correction (`RecentreOverlay`) that removes
+the constant part of the residual error in about two seconds.
 
 ### 2. Distance changes
 
@@ -93,11 +97,44 @@ Three things about camera placement *do* matter:
    puts the eyes in shadow, which is the most common cause of a poor result in
    practice.
 
+## The head-movement pass
+
+This is the most useful thing in the pipeline for free-headed use, and it is
+worth understanding why it exists.
+
+How much the eye must counter-rotate for a given head movement depends on the
+ratio of eyeball radius to eye width, and on the camera's field of view. Both
+vary between people and between machines, by enough to matter. So the nominal
+constants are only ever approximately right.
+
+They cannot be measured from the ordinary calibration grid. There, each screen
+position is seen at exactly one head pose, so "the eye moved because the head
+moved" and "the eye moved because they looked somewhere else" are perfectly
+aliased. No amount of cleverness separates them from that data.
+
+Holding the target fixed while the head moves removes the ambiguity. Every bit
+of variation in the measurement is then head-driven, and a plain three-parameter
+regression recovers the coefficients directly. Six seconds is enough.
+
+Measured on synthetic data whose true coefficients sit 30% away from the nominal
+ones (`scripts/calibrationCheck.ts`), for a 5° head turn combined with a 1.6 cm
+lateral shift:
+
+| | error after the head moved |
+|---|---|
+| no compensation at all | 6.1° |
+| nominal constants only | 2.5° |
+| after a head-movement pass | 0.3° |
+
+Those are synthetic numbers on an idealised eye and should be read as evidence
+that the mechanism works, not as a promise about a real client. But the size of
+the effect is why the pass is on by default.
+
 ## So: is a head frame worth it?
 
 **Yes, and mainly for translation rather than distance** — which is worth
 stating, because the intuitive reason to add a frame is usually "to keep the
-distance constant", and distance is the term the software already handles best.
+distance constant", and distance is the term the pipeline already handles best.
 
 Expected effect of a chin/forehead rest:
 
@@ -111,9 +148,14 @@ A reasonable expectation on a decent built-in webcam with good lighting is
 trusting the estimate. That is what the check step is for, and it is why it
 measures at points the model was never fitted on.
 
-If a frame is not practical (many clients will not tolerate one), the
-combination of the posture monitor and quick re-centring recovers a good part of
-the difference, provided someone acts on the prompts.
+**If a frame is not practical** — and many clients will not tolerate one — run
+the head-movement pass. On the synthetic evidence above it recovers most of what
+a rest would have given you, and it costs six seconds rather than a piece of
+equipment and a conversation about putting your chin on it. The posture monitor
+and quick re-centring cover the rest, provided someone acts on the prompts.
+
+A frame is still the better answer where it is tolerated, for assessment work,
+and for clients whose head position varies a lot within a session.
 
 ## How the mapping works
 
@@ -137,8 +179,25 @@ reintroducing:
 
 The mapping is a ridge-regularised polynomial whose feature set grows with the
 number of calibration points, plus a Gaussian-kernel local correction of the
-residuals that fades to zero away from the calibrated region. Head pose is a
-learned regressor, not a hand-tuned constant.
+residuals that fades to zero away from the calibrated region. Head pose is
+handled upstream of the polynomial, in feature space, and deliberately does
+*not* also appear as an additive output term: having both competing for the same
+signal leaves each of them underdetermined, and measurably degrades the result.
+
+`scripts/calibrationCheck.ts` exercises all of this against synthetic ground
+truth, including the edge-reachability property that the old interpolator
+failed. Run it with `bun run check:calibration`.
+
+Measured there on a curved synthetic eye with realistic landmark noise:
+
+| grid | error at points it was never fitted on |
+|---|---|
+| 5 points | ~2.5° |
+| 9 points | ~0.6° |
+| 13 points | ~0.25° |
+
+which is why the set-up screen describes five points as good enough for the
+games but not for measuring.
 
 ## What the numbers mean
 

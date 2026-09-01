@@ -67,9 +67,14 @@ const LOWER_IS_BETTER: NormMetric[] = ['fixationsPer100Words', 'regressionsPer10
  * jumping a whole grade at a time.
  */
 export function gradeEquivalentFor(metric: NormMetric, value: number): number | null {
-  if (!Number.isFinite(value) || value <= 0) return null;
+  if (!Number.isFinite(value) || value < 0) return null;
 
   const descending = LOWER_IS_BETTER.includes(metric);
+
+  // Zero is a real result for the measures where less is better — a reader who
+  // never went back has no regressions, which is the top of the scale, not a
+  // missing value. For the others it means nothing was measured.
+  if (value === 0) return descending ? TAYLOR_NORMS[TAYLOR_NORMS.length - 1].grade : null;
   const series = TAYLOR_NORMS.map(n => ({ grade: n.grade, value: n[metric] }));
 
   // Below the least mature norm.

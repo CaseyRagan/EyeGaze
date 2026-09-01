@@ -429,6 +429,31 @@ const ReportStage: React.FC<{
     URL.revokeObjectURL(url);
   };
 
+  if (analysis.onTextFixations === 0) {
+    return (
+      <div className="max-w-2xl mx-auto px-6 py-12 space-y-5">
+        <h2 className="text-2xl font-semibold text-ink">Nothing was recorded on the text</h2>
+        <p className="text-sm text-ink-soft leading-relaxed">
+          The tracker did not register a single fixation landing on a word. That means either the eyes
+          were not being tracked during the passage, or the mapping is far enough out that the gaze
+          never landed where the words are — a table of zeros would not tell you which.
+        </p>
+        <p className="text-sm text-ink-soft leading-relaxed">
+          {validation && Number.isFinite(validation.accuracyDeg)
+            ? `Accuracy was last measured at ${validation.accuracyDeg.toFixed(1)}°. `
+            : 'Eye tracking has not been checked. '}
+          Run set-up, confirm the marker lands where you are looking, then try the passage again.
+        </p>
+        <button
+          onClick={onRestart}
+          className="px-5 py-3 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium transition-colors"
+        >
+          Back to passages
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl mx-auto px-6 py-10 space-y-7">
       <div className="flex items-start justify-between gap-4 flex-wrap">

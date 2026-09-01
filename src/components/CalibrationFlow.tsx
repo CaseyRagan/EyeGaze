@@ -22,7 +22,7 @@ import { viewingGeometry } from '../services/viewingGeometry';
 import { PostureGuide } from './PostureGuide';
 import { gazeBus } from '../services/gazeBus';
 
-type Stage = 'position' | 'capture' | 'validate' | 'result';
+type Stage = 'position' | 'capture' | 'head_pass' | 'validate' | 'result';
 type Phase = 'settle' | 'collect';
 export type CalibrationDepth = 'quick' | 'standard' | 'precision';
 
@@ -40,6 +40,9 @@ const SETTLE_MS = 650;
 const COLLECT_MS = 900;
 /** Validation dwells are longer, because precision needs more samples. */
 const VALIDATE_COLLECT_MS = 1100;
+/** Length of the head-movement pass. Long enough to cover a full sweep twice. */
+const HEAD_PASS_SETTLE_MS = 900;
+const HEAD_PASS_COLLECT_MS = 6000;
 
 const DEPTH_TARGETS: Record<CalibrationDepth, CalibrationPointSpec[]> = {
   quick: QUICK_CALIBRATION_TARGETS,
@@ -48,9 +51,9 @@ const DEPTH_TARGETS: Record<CalibrationDepth, CalibrationPointSpec[]> = {
 };
 
 const DEPTH_COPY: Record<CalibrationDepth, { title: string; detail: string }> = {
-  quick: { title: '5 points', detail: 'About 15 seconds. Good enough for games.' },
-  standard: { title: '9 points', detail: 'About 25 seconds. The usual choice.' },
-  precision: { title: '13 points', detail: 'About 35 seconds. Best accuracy, for assessment.' },
+  quick: { title: '5 points', detail: 'About 15 seconds. Roughly 2–3° — fine for the games, not for measuring.' },
+  standard: { title: '9 points', detail: 'About 25 seconds. The usual choice for a session.' },
+  precision: { title: '13 points', detail: 'About 35 seconds. Use this before a reading assessment.' },
 };
 
 /**
@@ -78,6 +81,8 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const [capturedCount, setCapturedCount] = useState(0);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [failedPoints, setFailedPoints] = useState<number[]>([]);
+  const [wantHeadPass, setWantHeadPass] = useState(true);
+  const [headPassOutcome, setHeadPassOutcome] = useState<'pending' | 'measured' | 'skipped' | 'failed'>('pending');
 
   const samplesRef = useRef<CalibrationSample[]>([]);
   const gazePointsRef = useRef<Array<{ x: number; y: number }>>([]);
@@ -108,6 +113,14 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     phaseStartRef.current = performance.now();
     soundEngine.playChime(560, 0.1);
   }, []);
+
+  const startValidationPhase = useCallback(() => {
+    validationResultsRef.current = [];
+    framesSeenRef.current = 0;
+    framesUsedRef.current = 0;
+    setStage('validate');
+    beginPoint(0);
+  }, [beginPoint]);
 
   const finishCapturePoint = useCallback(
     (spec: CalibrationPointSpec) => {
@@ -215,7 +228,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   // Sample sink: fed by the tracker on every usable frame.
   useEffect(() => {
     if (!isOpen || !tracker) return;
-    if (stage !== 'capture' && stage !== 'validate') {
+    if (stage !== 'capture' && stage !== 'validate' && stage !== 'head_pass') {
       tracker.collectSamples(null);
       return;
     }
@@ -231,6 +244,35 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
     return () => tracker.collectSamples(null);
   }, [isOpen, tracker, stage, phase]);
+
+  // Timing loop for the head-movement pass.
+  useEffect(() => {
+    if (!isOpen || stage !== 'head_pass') return;
+
+    let frame = 0;
+    const tick = () => {
+      const elapsed = performance.now() - phaseStartRef.current;
+
+      if (elapsed < HEAD_PASS_SETTLE_MS) {
+        setProgress(elapsed / HEAD_PASS_SETTLE_MS);
+        if (phase !== 'settle') setPhase('settle');
+      } else if (elapsed < HEAD_PASS_SETTLE_MS + HEAD_PASS_COLLECT_MS) {
+        if (phase !== 'collect') setPhase('collect');
+        setProgress((elapsed - HEAD_PASS_SETTLE_MS) / HEAD_PASS_COLLECT_MS);
+      } else {
+        const gain = calibrationEngine.fitHeadGainFromMotionPass(samplesRef.current);
+        setHeadPassOutcome(gain ? 'measured' : 'failed');
+        soundEngine.playChime(gain ? 640 : 380, 0.15);
+        startValidationPhase();
+        return;
+      }
+
+      frame = requestAnimationFrame(tick);
+    };
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [isOpen, stage, phase, startValidationPhase]);
 
   // Timing loop for the settle/collect cycle.
   useEffect(() => {
@@ -300,6 +342,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     setCapturedCount(0);
     setFailedPoints([]);
     setValidation(null);
+    setHeadPassOutcome('pending');
     validationResultsRef.current = [];
     framesSeenRef.current = 0;
     framesUsedRef.current = 0;
@@ -307,13 +350,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     beginPoint(0);
   };
 
-  const startValidationOnly = () => {
-    validationResultsRef.current = [];
-    framesSeenRef.current = 0;
-    framesUsedRef.current = 0;
-    setStage('validate');
-    beginPoint(0);
-  };
+  const startValidationOnly = () => startValidationPhase();
 
   useEffect(() => {
     if (!isOpen) {
@@ -348,9 +385,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
           <div>
             <h2 className="text-base font-semibold text-ink">Set up eye tracking</h2>
             <p className="text-xs text-ink-soft">
-              {stage === 'position' && 'Step 1 of 3 — get comfortable'}
-              {stage === 'capture' && `Step 2 of 3 — teaching the tracker (${capturedCount}/${targets.length})`}
-              {stage === 'validate' && `Step 3 of 3 — checking accuracy (${targetIndex + 1}/${targets.length})`}
+              {stage === 'position' && 'First — get comfortable'}
+              {stage === 'capture' && `Teaching the tracker (${capturedCount}/${targets.length})`}
+              {stage === 'head_pass' && 'Allowing for head movement'}
+              {stage === 'validate' && `Checking accuracy (${targetIndex + 1}/${targets.length})`}
               {stage === 'result' && 'Done — here is how it went'}
             </p>
           </div>
@@ -365,7 +403,13 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       </header>
 
       {stage === 'position' && (
-        <PositionStage depth={depth} onDepthChange={setDepth} onStart={startCapture} />
+        <PositionStage
+          depth={depth}
+          onDepthChange={setDepth}
+          wantHeadPass={wantHeadPass}
+          onWantHeadPassChange={setWantHeadPass}
+          onStart={startCapture}
+        />
       )}
 
       {(stage === 'capture' || stage === 'validate') && currentTarget && (
@@ -379,8 +423,11 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         />
       )}
 
+      {stage === 'head_pass' && <HeadPassStage phase={phase} progress={progress} />}
+
       {stage === 'result' && (
         <ResultStage
+          headPassOutcome={headPassOutcome}
           validation={validation}
           failedPoints={failedPoints}
           onRedo={() => setStage('position')}
@@ -400,8 +447,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 const PositionStage: React.FC<{
   depth: CalibrationDepth;
   onDepthChange: (d: CalibrationDepth) => void;
+  wantHeadPass: boolean;
+  onWantHeadPassChange: (v: boolean) => void;
   onStart: () => void;
-}> = ({ depth, onDepthChange, onStart }) => (
+}> = ({ depth, onDepthChange, wantHeadPass, onWantHeadPassChange, onStart }) => (
   <div className="flex-1 overflow-auto">
     <div className="max-w-4xl mx-auto px-6 py-8 grid md:grid-cols-2 gap-8">
       <div className="space-y-5">
@@ -448,6 +497,23 @@ const PositionStage: React.FC<{
             ))}
           </div>
         </div>
+
+        <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-soft px-4 py-3">
+          <input
+            type="checkbox"
+            checked={wantHeadPass}
+            onChange={e => onWantHeadPassChange(e.target.checked)}
+            className="mt-1 accent-[var(--color-sage-500)]"
+          />
+          <span className="text-sm">
+            <span className="text-ink font-medium block">Allow for head movement (6 seconds)</span>
+            <span className="text-ink-soft leading-relaxed">
+              One extra step where you keep looking at a dot while moving your head a little. It
+              measures how your eyes respond to head movement, which keeps tracking accurate when you
+              shift in the seat later. Well worth it without a head rest.
+            </span>
+          </span>
+        </label>
 
         <button
           onClick={onStart}
@@ -538,6 +604,60 @@ const CaptureStage: React.FC<{
 
 // --------------------------------------------------------------------------
 
+/**
+ * The head-movement pass.
+ *
+ * The ordinary grid sees each screen position at exactly one head pose, so the
+ * effect of moving the head is indistinguishable from the effect of looking
+ * somewhere else. Holding the target still while the head moves separates them,
+ * and six seconds of it is enough to measure how far this particular person's
+ * eyes counter-rotate — which is what lets the tracker stay accurate when they
+ * shift in the chair later.
+ */
+const HeadPassStage: React.FC<{ phase: Phase; progress: number }> = ({ phase, progress }) => {
+  const collecting = phase === 'collect';
+  const radius = 34;
+  const circumference = 2 * Math.PI * radius;
+
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center gap-8 px-6">
+      <div className="text-center max-w-md space-y-2">
+        <h3 className="text-xl font-semibold text-ink">Keep looking at the dot</h3>
+        <p className="text-sm text-ink-soft leading-relaxed">
+          {collecting
+            ? 'Now slowly turn your head a little to each side, then nod gently up and down. Keep your eyes on the dot the whole time.'
+            : 'Settle your gaze on the dot. In a moment you will be asked to move your head.'}
+        </p>
+      </div>
+
+      <svg width={90} height={90} className="overflow-visible">
+        <circle cx={45} cy={45} r={radius} fill="none" stroke="var(--border-strong)" strokeWidth={3} />
+        <circle
+          cx={45}
+          cy={45}
+          r={radius}
+          fill="none"
+          stroke={collecting ? 'var(--color-sage-500)' : 'var(--color-clay-300)'}
+          strokeWidth={3}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - progress)}
+          transform="rotate(-90 45 45)"
+        />
+        <circle cx={45} cy={45} r={5} fill="var(--color-sage-500)" />
+      </svg>
+
+      {collecting && (
+        <p className="text-sm text-ink-faint">
+          {progress < 0.5 ? 'Turn side to side…' : 'Now nod gently…'}
+        </p>
+      )}
+    </div>
+  );
+};
+
+// --------------------------------------------------------------------------
+
 const GRADE_COPY: Record<ValidationResult['grade'], { label: string; tone: string; advice: string }> = {
   excellent: {
     label: 'Excellent',
@@ -566,10 +686,11 @@ const GRADE_COPY: Record<ValidationResult['grade'], { label: string; tone: strin
 const ResultStage: React.FC<{
   validation: ValidationResult | null;
   failedPoints: number[];
+  headPassOutcome: 'pending' | 'measured' | 'skipped' | 'failed';
   onRedo: () => void;
   onRecheck: () => void;
   onAccept: () => void;
-}> = ({ validation, failedPoints, onRedo, onRecheck, onAccept }) => {
+}> = ({ validation, failedPoints, headPassOutcome, onRedo, onRecheck, onAccept }) => {
   if (!validation || !Number.isFinite(validation.accuracyDeg)) {
     return (
       <div className="flex-1 flex items-center justify-center px-6">
@@ -645,11 +766,29 @@ const ResultStage: React.FC<{
           <p className="text-xs text-ink-faint mt-3 leading-relaxed">
             Measured at five points the tracker was not taught, so this is a fair test rather than a
             self-assessment.
-            {quality && quality.crossValidatedErrorDeg > 0 && (
-              <> Set-up points themselves agreed to within {quality.crossValidatedErrorDeg.toFixed(1)}°.</>
+            {/* Leave-one-out error is only informative once there are more
+                points than the model has parameters; with five it mostly
+                measures extrapolation and looks alarming for no reason. */}
+            {quality && quality.anchorCount >= 9 && quality.crossValidatedErrorDeg > 0 && (
+              <> Leaving each set-up point out in turn, the rest predicted it to within{' '}
+              {quality.crossValidatedErrorDeg.toFixed(1)}°.</>
             )}
           </p>
         </div>
+
+        {headPassOutcome !== 'pending' && (
+          <div className="surface rounded-2xl px-5 py-4">
+            <h4 className="text-sm font-semibold text-ink mb-1">Head movement</h4>
+            <p className="text-sm text-ink-soft leading-relaxed">
+              {headPassOutcome === 'measured' &&
+                'Measured. Tracking should hold up when you shift in the seat, though re-centring after a big move is still worth doing.'}
+              {headPassOutcome === 'skipped' &&
+                'Not measured. Tracking will drift if you move much from where you are sitting now — a chin or forehead rest, or running this step, both help.'}
+              {headPassOutcome === 'failed' &&
+                'There was not enough head movement to measure anything, so a standard allowance is being used. You can run set-up again and move your head a little more during that step.'}
+            </p>
+          </div>
+        )}
 
         <p className="text-xs text-ink-faint leading-relaxed">
           Degrees are worked out from your screen size and a viewing distance of{' '}

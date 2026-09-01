@@ -10,13 +10,105 @@ import {
   RegressionModel,
   ValidationResult,
 } from '../types';
-import { median, ridgeSolve, robustInlierIndices, standardiseColumns } from './linalg';
+import { median, ridgeSolve, robustInlierIndices, standardDeviation, standardiseColumns } from './linalg';
 import { viewingGeometry } from './viewingGeometry';
 
 const STORAGE_KEY = 'gazeflow_calibration_v3';
 
+/** Kernel width for the local correction, as a fraction of anchor spacing. */
+const KERNEL_SIGMA_FACTOR = 0.55;
+
 /** Assumed webcam horizontal field of view, for converting image offsets to cm. */
 const ASSUMED_HFOV_DEG = 60;
+
+/**
+ * Feature units per radian of eye rotation.
+ *
+ * The gaze feature is the iris centre's offset from the eye's centre divided by
+ * the eye's corner-to-corner width, so rotating the eye by θ moves it by
+ * (eyeball radius / eye width)·sin θ. Adult anatomy puts that ratio near
+ * 12 mm / 30 mm.
+ */
+const FEATURE_UNITS_PER_RADIAN = 0.4;
+
+/**
+ * Feature units per unit of normalised head translation in the image.
+ *
+ * Shifting the head sideways by `t` image units at distance d moves it
+ * t·2d·tan(fov/2) centimetres, which requires an extra eye rotation of
+ * t·2·tan(fov/2) radians to keep fixating the same point. The distance cancels,
+ * so this is a constant.
+ */
+const FEATURE_UNITS_PER_TRANSLATION =
+  FEATURE_UNITS_PER_RADIAN * 2 * Math.tan((ASSUMED_HFOV_DEG * Math.PI) / 360);
+
+/** The head pose a set of features was measured at. */
+export interface FeaturePosture {
+  yaw: number;
+  pitch: number;
+  translateX: number;
+  translateY: number;
+}
+
+/**
+ * Undoes the effect of head movement on the eye measurement, relative to the
+ * posture held during calibration.
+ *
+ * This has to happen *before* the polynomial rather than as an additive term
+ * after it. Head movement shifts the measurement itself: to keep fixating the
+ * same point while the head turns, the eye rotates back by the same angle, so
+ * the observed feature is the one the client would have produced looking
+ * somewhere else entirely. Feeding that shifted value through a curved mapping
+ * and then adding a correction cannot recover the right answer, because the
+ * curvature has already been applied at the wrong place.
+ *
+ * The constants come from anatomy and camera geometry rather than from the
+ * calibration data, so this works even when the client held perfectly still
+ * during set-up and the fit therefore learned nothing about head movement. The
+ * regression's own head terms then absorb whatever these constants get wrong.
+ */
+export function compensateForHead(
+  gx: number,
+  gy: number,
+  posture: FeaturePosture,
+  reference: FeaturePosture,
+  gain: HeadGain
+): { gx: number; gy: number } {
+  const dYaw = posture.yaw - reference.yaw;
+  const dPitch = posture.pitch - reference.pitch;
+  const dTx = posture.translateX - reference.translateX;
+  const dTy = posture.translateY - reference.translateY;
+
+  const rotation = FEATURE_UNITS_PER_RADIAN * gain.rotation;
+  const translation = FEATURE_UNITS_PER_TRANSLATION * gain.translation;
+
+  return {
+    gx: gx + rotation * dYaw + translation * dTx,
+    gy: gy - rotation * dPitch + translation * dTy,
+  };
+}
+
+/**
+ * Multipliers on the nominal compensation constants.
+ *
+ * The nominal values come from average anatomy and an assumed camera field of
+ * view, and both vary between people and machines — eyeball radius relative to
+ * palpebral width differs, and webcam optics differ more than that. When the
+ * calibration data contains enough head movement to identify them, these are
+ * fitted; otherwise they stay at 1 and the nominal constants are used as-is.
+ */
+export interface HeadGain {
+  rotation: number;
+  translation: number;
+}
+
+const NOMINAL_HEAD_GAIN: HeadGain = { rotation: 1, translation: 1 };
+
+/** Below this spread in the anchors, head gain cannot be identified from them. */
+const MIN_YAW_SPREAD = 0.02;
+const MIN_TRANSLATION_SPREAD = 0.006;
+
+
 
 export interface CalibrationPointSpec {
   id: number;
@@ -70,32 +162,28 @@ export const VALIDATION_TARGETS: CalibrationPointSpec[] = [
 ];
 
 /**
- * Builds the design row for one sample.
+ * Builds the design row for one sample, from an already head-compensated
+ * feature.
  *
- * The feature set grows with the number of anchors available, because fitting
- * ten unknowns to five points produces a confident-looking model that is mostly
- * noise. Head pose enters as its own regressor rather than as a hand-tuned
- * constant, so the model only leans on it to the extent the calibration data
- * actually supports.
+ * The polynomial's job is only the eye-to-screen relationship. Head pose is
+ * handled entirely by compensateForHead, upstream of this, and deliberately
+ * does not appear here as an additive output term: an additive term after a
+ * curved mapping cannot undo an offset applied before it, and having both a
+ * feature-space compensation and an output-space correction competing for the
+ * same signal leaves each of them underdetermined.
+ *
+ * The feature set still grows with the number of anchors, because fitting six
+ * unknowns to four points produces a confident-looking model that is mostly
+ * noise.
  */
-export function buildFeatureRow(
-  gx: number,
-  gy: number,
-  yaw: number,
-  pitch: number,
-  tx: number,
-  ty: number,
-  degree: number
-): number[] {
+export function buildFeatureRow(gx: number, gy: number, degree: number): number[] {
   const row = [1, gx, gy];
   if (degree >= 2) row.push(gx * gy);
   if (degree >= 3) row.push(gx * gx, gy * gy);
-  if (degree >= 4) row.push(yaw, pitch, tx, ty);
   return row;
 }
 
 export function featureDegreeForAnchorCount(count: number): number {
-  if (count >= 9) return 4;
   if (count >= 6) return 3;
   if (count >= 4) return 2;
   return 1;
@@ -339,9 +427,106 @@ export class CalibrationEngine {
   }
 
   private fitRegression(anchors: CalibrationAnchor[], degree: number): RegressionModel | null {
-    const rawRows = anchors.map(a =>
-      buildFeatureRow(a.gx, a.gy, a.headYaw, a.headPitch, a.headTranslateX, a.headTranslateY, degree)
+    // The reference posture is the average head position across the anchors, so
+    // compensation is zero at the posture the client actually calibrated in and
+    // the fit is unchanged for someone who does not move.
+    const reference: FeaturePosture = {
+      yaw: median(anchors.map(a => a.headYaw)),
+      pitch: median(anchors.map(a => a.headPitch)),
+      translateX: median(anchors.map(a => a.headTranslateX)),
+      translateY: median(anchors.map(a => a.headTranslateY)),
+    };
+
+    return this.fitWithGain(anchors, degree, reference, this.model.headGain ?? NOMINAL_HEAD_GAIN);
+  }
+
+  /**
+   * Measures how much this person's eyes move in response to head movement,
+   * from a pass where they held their gaze on one point while moving their head.
+   *
+   * This cannot be recovered from the ordinary calibration grid: there, each
+   * screen position is seen at exactly one head pose, so the effect of head
+   * movement is perfectly aliased with the effect of looking somewhere else.
+   * Holding the target fixed removes the ambiguity — every bit of variation in
+   * the measurement is then head-driven, and a plain regression recovers the
+   * two coefficients directly.
+   *
+   * Returns the fitted gain, or null when the pass did not contain enough
+   * head movement to measure anything.
+   */
+  public fitHeadGainFromMotionPass(samples: CalibrationSample[]): HeadGain | null {
+    const usable = samples.filter(s => s.quality > 0.3);
+    if (usable.length < 25) return null;
+
+    const yawSpread = standardDeviation(usable.map(s => s.headYaw));
+    const pitchSpread = standardDeviation(usable.map(s => s.headPitch));
+    const txSpread = standardDeviation(usable.map(s => s.headTranslateX));
+    const tySpread = standardDeviation(usable.map(s => s.headTranslateY));
+
+    const rotationSpread = Math.max(yawSpread, pitchSpread);
+    const translationSpread = Math.max(txSpread, tySpread);
+    if (rotationSpread < MIN_YAW_SPREAD && translationSpread < MIN_TRANSLATION_SPREAD) return null;
+
+    // Horizontal: observed gx = constant - k_rot*yaw - k_trans*tx
+    const horizontal = ridgeSolve(
+      usable.map(s => [1, s.headYaw, s.headTranslateX]),
+      usable.map(s => s.gx),
+      1e-6
     );
+    // Vertical: observed gy = constant + k_rot*pitch - k_trans*ty
+    const vertical = ridgeSolve(
+      usable.map(s => [1, s.headPitch, s.headTranslateY]),
+      usable.map(s => s.gy),
+      1e-6
+    );
+    if (!horizontal || !vertical) return null;
+
+    const rotationEstimates: Array<{ value: number; weight: number }> = [];
+    const translationEstimates: Array<{ value: number; weight: number }> = [];
+
+    if (yawSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: -horizontal[1], weight: yawSpread });
+    if (pitchSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: vertical[1], weight: pitchSpread });
+    if (txSpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -horizontal[2], weight: txSpread });
+    if (tySpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -vertical[2], weight: tySpread });
+
+    const combine = (estimates: Array<{ value: number; weight: number }>, nominal: number) => {
+      if (estimates.length === 0) return 1;
+      const total = estimates.reduce((sum, e) => sum + e.weight, 0);
+      const value = estimates.reduce((sum, e) => sum + e.value * e.weight, 0) / total;
+      const ratio = value / nominal;
+      // Anything outside this range is a measurement failure rather than an
+      // unusual person, so fall back to the nominal constant rather than
+      // trusting it.
+      return ratio >= 0.3 && ratio <= 3 ? ratio : 1;
+    };
+
+    const gain: HeadGain = {
+      rotation: combine(rotationEstimates, FEATURE_UNITS_PER_RADIAN),
+      translation: combine(translationEstimates, FEATURE_UNITS_PER_TRANSLATION),
+    };
+
+    this.model.headGain = gain;
+    this.refit();
+    return gain;
+  }
+
+  private fitWithGain(
+    anchors: CalibrationAnchor[],
+    degree: number,
+    reference: FeaturePosture,
+    gain: HeadGain
+  ): RegressionModel | null {
+    const compensated = anchors.map(a =>
+      compensateForHead(
+        a.gx,
+        a.gy,
+        { yaw: a.headYaw, pitch: a.headPitch, translateX: a.headTranslateX, translateY: a.headTranslateY },
+        reference,
+        gain
+      )
+    );
+
+    const rawRows = compensated.map(c => buildFeatureRow(c.gx, c.gy, degree));
     const { mean: featureMean, std: featureStd } = standardiseColumns(rawRows);
     const rows = standardiseRows(rawRows, featureMean, featureStd);
 
@@ -367,6 +552,8 @@ export class CalibrationEngine {
 
     const base: RegressionModel = {
       degree,
+      reference,
+      headGain: gain,
       weightsX,
       weightsY,
       featureMean,
@@ -378,21 +565,23 @@ export class CalibrationEngine {
     // Local correction: whatever the global polynomial systematically misses at
     // each anchor gets folded back in near that anchor, and fades to nothing
     // away from the calibrated region so we never extrapolate a correction.
+    // Residuals are indexed by the *compensated* feature, which is the space
+    // predictions are looked up in.
     const residuals = anchors.map((a, i) => {
       const p = this.applyGlobal(base, rows[i]);
-      return { gx: a.gx, gy: a.gy, dx: a.xNorm - p.x, dy: a.yNorm - p.y };
+      return { gx: compensated[i].gx, gy: compensated[i].gy, dx: a.xNorm - p.x, dy: a.yNorm - p.y };
     });
 
-    const nearestNeighbourDistances = anchors.map((a, i) => {
+    const nearestNeighbourDistances = compensated.map((a, i) => {
       let best = Infinity;
-      anchors.forEach((b, j) => {
+      compensated.forEach((b, j) => {
         if (i === j) return;
         best = Math.min(best, Math.hypot(a.gx - b.gx, a.gy - b.gy));
       });
       return Number.isFinite(best) ? best : 0.05;
     });
 
-    const kernelSigma = Math.max(0.012, Math.min(0.12, median(nearestNeighbourDistances) * 0.8));
+    const kernelSigma = Math.max(0.012, Math.min(0.12, median(nearestNeighbourDistances) * KERNEL_SIGMA_FACTOR));
 
     return { ...base, residuals, kernelSigma };
   }
@@ -459,7 +648,16 @@ export class CalibrationEngine {
     tx: number,
     ty: number
   ): Point2D {
-    const raw = buildFeatureRow(gx, gy, yaw, pitch, tx, ty, regression.degree);
+    const reference = regression.reference;
+    const compensated = compensateForHead(
+      gx,
+      gy,
+      { yaw, pitch, translateX: tx, translateY: ty },
+      reference,
+      regression.headGain
+    );
+
+    const raw = buildFeatureRow(compensated.gx, compensated.gy, regression.degree);
     const standardised = raw.map((v, i) =>
       i === 0 ? 1 : (v - regression.featureMean[i]) / regression.featureStd[i]
     );
@@ -477,7 +675,8 @@ export class CalibrationEngine {
     let nearestWeight = 0;
 
     for (const r of regression.residuals) {
-      const distSq = (gx - r.gx) * (gx - r.gx) + (gy - r.gy) * (gy - r.gy);
+      const distSq =
+        (compensated.gx - r.gx) * (compensated.gx - r.gx) + (compensated.gy - r.gy) * (compensated.gy - r.gy);
       const w = Math.exp(-distSq / twoSigmaSq);
       weightSum += w;
       dx += w * r.dx;

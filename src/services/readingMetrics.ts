@@ -284,8 +284,12 @@ export function analyseReading(params: {
     gradeEquivalents.rate,
   ].filter((g): g is number => g !== null);
 
+  // An "overall" figure drawn from a single surviving measure is not an
+  // overall figure, and reporting one from a recording where the eyes were
+  // barely tracked is how a tool ends up quoting a grade level it has no basis
+  // for. Three of the four measures have to be present.
   gradeEquivalents.overall =
-    presentGrades.length > 0 ? presentGrades.reduce((a, b) => a + b, 0) / presentGrades.length : null;
+    presentGrades.length >= 3 ? presentGrades.reduce((a, b) => a + b, 0) / presentGrades.length : null;
 
   // A wide spread between the individual grade equivalents is itself
   // informative: it usually means efficiency and speed have come apart.
@@ -334,6 +338,19 @@ export function toRawSample(gaze: GazeState): RawGazeSample {
 export function interpretReading(analysis: ReadingAnalysis): string[] {
   const notes: string[] = [];
   const overall = analysis.gradeEquivalents.overall;
+
+  if (analysis.onTextFixations === 0) {
+    notes.push(
+      'No fixations were recorded on the text at all. Either tracking was lost, or the mapping is far enough out that the gaze never landed on a word. Run set-up again before repeating this.'
+    );
+    return notes;
+  }
+
+  if (analysis.onTextFixations < 20) {
+    notes.push(
+      'Very few fixations were recorded, so the per-hundred-word figures rest on too little data to interpret. Check the accuracy figure and repeat the passage.'
+    );
+  }
 
   if (analysis.trackingRatio < 0.7) {
     notes.push(

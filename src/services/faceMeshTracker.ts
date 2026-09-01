@@ -90,6 +90,8 @@ export class FaceMeshTracker {
 
   private lastSnappedTarget: Point2D | null = null;
   private simulatedPointer = false;
+  private pointerLoopId: number | null = null;
+  private pointerPosition: Point2D | null = null;
 
   /** Live sample sink used by the calibration screens. */
   private sampleCollector: ((sample: CalibrationSample, gaze: GazeState, usable: boolean) => void) | null = null;
@@ -573,9 +575,43 @@ export class FaceMeshTracker {
     };
   }
 
-  /** Mouse fallback, so the whole app remains usable without a camera. */
+  /**
+   * Mouse fallback, so the whole app remains usable without a camera.
+   *
+   * A real tracker emits samples continuously whether or not the eye is moving,
+   * and anything downstream that reasons about time — fixation detection, dwell
+   * timing, the reading analysis — depends on that. Pointer events only fire
+   * while the mouse is moving, so this records the position and lets a steady
+   * loop publish it, rather than publishing one sample per event and leaving
+   * every pause in the recording as a gap.
+   */
   public simulateGazeFromPointer(clientX: number, clientY: number) {
     this.simulatedPointer = true;
+    this.pointerPosition = { x: clientX, y: clientY };
+    if (this.pointerLoopId === null) this.startPointerLoop();
+  }
+
+  private startPointerLoop() {
+    const SAMPLE_INTERVAL_MS = 1000 / 30;
+    let lastEmit = 0;
+
+    const loop = () => {
+      if (this.disposed || !this.simulatedPointer) {
+        this.pointerLoopId = null;
+        return;
+      }
+      const now = performance.now();
+      if (this.pointerPosition && now - lastEmit >= SAMPLE_INTERVAL_MS) {
+        lastEmit = now;
+        this.emitPointerSample(this.pointerPosition.x, this.pointerPosition.y);
+      }
+      this.pointerLoopId = requestAnimationFrame(loop);
+    };
+
+    this.pointerLoopId = requestAnimationFrame(loop);
+  }
+
+  private emitPointerSample(clientX: number, clientY: number) {
     const now = Date.now();
     const dtSec = this.lastSampleTime > 0 ? Math.max(0.008, (now - this.lastSampleTime) / 1000) : 0.033;
     this.lastSampleTime = now;
@@ -652,10 +688,18 @@ export class FaceMeshTracker {
 
   public setSimulatedPointer(enabled: boolean) {
     this.simulatedPointer = enabled;
+    if (!enabled && this.pointerLoopId !== null) {
+      cancelAnimationFrame(this.pointerLoopId);
+      this.pointerLoopId = null;
+    }
   }
 
   public dispose() {
     this.disposed = true;
+    if (this.pointerLoopId !== null) {
+      cancelAnimationFrame(this.pointerLoopId);
+      this.pointerLoopId = null;
+    }
     if (this.animationFrameId) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;

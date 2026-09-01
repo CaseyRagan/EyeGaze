@@ -159,7 +159,11 @@ export default function App() {
           </div>
         </div>
 
-        <nav className={`${navOpen ? 'flex' : 'hidden'} lg:flex absolute lg:static top-full left-0 right-0 lg:top-auto flex-col lg:flex-row gap-1 p-2 lg:p-0 bg-[var(--surface-raised)] lg:bg-transparent border-b lg:border-0 border-soft`}>
+        <nav
+          className={`${
+            navOpen ? 'flex' : 'hidden'
+          } lg:flex absolute lg:static top-full left-0 right-0 lg:top-auto flex-col lg:flex-row gap-1 p-2 lg:p-0 bg-[var(--surface-raised)] lg:bg-transparent border-b lg:border-0 border-soft lg:min-w-0 lg:overflow-x-auto`}
+        >
           {ACTIVITIES.map(activity => {
             const Icon = activity.icon;
             const isActive = activeTab === activity.id;
@@ -171,7 +175,7 @@ export default function App() {
                   setNavOpen(false);
                   soundEngine.playChime(480, 0.12);
                 }}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-colors ${
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
                   isActive
                     ? 'bg-sage-100 text-sage-700'
                     : 'text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)]'

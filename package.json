@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "typecheck": "tsc --noEmit",
+    "check:calibration": "bun run scripts/calibrationCheck.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

@@ -115,6 +115,10 @@ export interface CalibrationAnchor {
 export interface RegressionModel {
   /** Which feature set this model was fitted with; see featureDegreeForAnchorCount. */
   degree: number;
+  /** The head pose the model was fitted at; head compensation is relative to it. */
+  reference: { yaw: number; pitch: number; translateX: number; translateY: number };
+  /** Fitted multipliers on the nominal head-compensation constants. */
+  headGain: { rotation: number; translation: number };
   /** Weights for the standardised design matrix, one set per output axis. */
   weightsX: number[];
   weightsY: number[];
@@ -177,6 +181,8 @@ export interface CalibrationPosture {
 
 export interface CalibrationModel {
   isCalibrated: boolean;
+  /** Person-specific multipliers on the head-compensation constants. */
+  headGain?: { rotation: number; translation: number };
   lastCalibratedAt?: number;
   regression?: RegressionModel;
   quality?: CalibrationQuality;

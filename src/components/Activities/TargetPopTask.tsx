@@ -17,7 +17,7 @@ interface Bubble {
   spawnedAt: number;
 }
 
-const HUES = ['var(--color-sage-300)', 'var(--color-clay-300)', 'var(--color-sky-300)', 'var(--color-honey-300)'];
+const HUES = ['var(--color-sage-400)', 'var(--color-clay-400)', 'var(--color-sky-500)', 'var(--color-honey-500)'];
 
 /** Difficulty is expressed as target size, because that is what generalises. */
 const SIZES = [
@@ -143,9 +143,9 @@ export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ dwellDurationMs })
                 cy={bubble.radius + 8}
                 r={bubble.radius}
                 fill={bubble.hue}
-                fillOpacity={isActive ? 0.5 : 0.3}
+                fillOpacity={isActive ? 0.55 : 0.34}
                 stroke={bubble.hue}
-                strokeWidth={2}
+                strokeWidth={2.5}
               />
               {progress > 0 && (
                 <circle
