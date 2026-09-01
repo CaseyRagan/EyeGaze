@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .font-mono-tech {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  .font-serif-chic {
+    font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+  }
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #080808;
+}
+::-webkit-scrollbar-thumb {
+  background: #262626;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+}
+
+/* Range input styling for sleek sliders */
+input[type=range] {
+  accent-color: #10b981;
+}
+

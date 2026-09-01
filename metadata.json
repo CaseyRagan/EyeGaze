@@ -1,0 +1,10 @@
+{
+  "name": "GazeFlow - Eye Tracking & Gaze Canvas",
+  "description": "Magical and accurate eye tracking experience using webcam to draw lines and complete interactive gaze tasks.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
