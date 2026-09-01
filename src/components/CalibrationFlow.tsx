@@ -671,7 +671,7 @@ const GRADE_COPY: Record<ValidationResult['grade'], { label: string; tone: strin
   },
   fair: {
     label: 'Workable',
-    tone: 'text-[#8a6a22] bg-honey-100 border-honey-300',
+    tone: 'text-honey-700 bg-honey-100 border-honey-300',
     advice:
       'Fine for large targets and games. For reading assessment, try again with better lighting or a steadier head position.',
   },

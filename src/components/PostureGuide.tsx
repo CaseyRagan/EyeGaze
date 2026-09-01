@@ -38,7 +38,7 @@ export const PostureGuide: React.FC<PostureGuideProps> = ({ variant = 'compact',
     drift.severity === 'good'
       ? { bg: 'bg-sage-50', border: 'border-sage-200', text: 'text-sage-700', icon: Check }
       : drift.severity === 'drifting'
-      ? { bg: 'bg-honey-100', border: 'border-honey-300', text: 'text-[#8a6a22]', icon: MoveHorizontal }
+      ? { bg: 'bg-honey-100', border: 'border-honey-300', text: 'text-honey-700', icon: MoveHorizontal }
       : { bg: 'bg-clay-100', border: 'border-clay-300', text: 'text-clay-500', icon: AlertTriangle };
 
   const Icon = tone.icon;

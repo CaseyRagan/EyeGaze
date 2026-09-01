@@ -41,7 +41,10 @@ export const GazeTypingTask: React.FC<GazeTypingTaskProps> = ({ dwellDurationMs 
   const [openGroup, setOpenGroup] = useState<number | null>(null);
   const [showPhrases, setShowPhrases] = useState(false);
   const tileRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const [, setLayoutTick] = useState(0);
+  // Bumped once the tiles have been laid out, and again on resize, so the dwell
+  // targets are recomputed from real positions rather than from refs that were
+  // still empty on the first render.
+  const [layoutTick, setLayoutTick] = useState(0);
 
   const speak = useCallback((value: string) => {
     if (!value.trim() || !('speechSynthesis' in window)) return;
@@ -108,7 +111,7 @@ export const GazeTypingTask: React.FC<GazeTypingTaskProps> = ({ dwellDurationMs 
       })
       .filter((t): t is DwellTarget => t !== null);
     // Recomputed whenever the tiles change or the window resizes.
-  }, [tiles, setLayoutTick]);
+  }, [tiles, layoutTick]);
 
   const handleSelect = useCallback(
     (id: string) => {

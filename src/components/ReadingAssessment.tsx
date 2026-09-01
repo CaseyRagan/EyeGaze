@@ -245,7 +245,7 @@ const ChooseStage: React.FC<{
 
       {accuracyWarning && (
         <div className="rounded-2xl border border-honey-300 bg-honey-100 px-4 py-3">
-          <p className="text-sm text-[#8a6a22] leading-relaxed">
+          <p className="text-sm text-honey-700 leading-relaxed">
             {validation && Number.isFinite(validation.accuracyDeg)
               ? `Current accuracy is about ${validation.accuracyDeg.toFixed(1)}°, which is wider than a word on this screen. `
               : 'Eye tracking has not been checked yet. '}

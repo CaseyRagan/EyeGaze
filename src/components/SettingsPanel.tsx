@@ -130,7 +130,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               ))}
             </div>
             {settings.trackingEngineMode && settings.trackingEngineMode !== 'binocular' && (
-              <p className="text-xs text-[#8a6a22] bg-honey-100 border border-honey-300 rounded-xl px-3 py-2 leading-relaxed">
+              <p className="text-xs text-honey-700 bg-honey-100 border border-honey-300 rounded-xl px-3 py-2 leading-relaxed">
                 Changing which eyes are used changes what the tracker measures, so the existing
                 calibration no longer applies. Run set-up again before relying on the numbers.
               </p>

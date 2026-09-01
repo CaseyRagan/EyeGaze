@@ -34,7 +34,7 @@ export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => 
     ? 'text-clay-500'
     : validation && validation.grade !== 'poor'
     ? 'text-sage-600'
-    : 'text-[#8a6a22]';
+    : 'text-honey-700';
 
   const trackingState = !gaze
     ? 'Starting'

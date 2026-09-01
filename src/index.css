@@ -41,6 +41,9 @@
   --color-honey-100: #fbf1dc;
   --color-honey-300: #edcb84;
   --color-honey-500: #c99a3c;
+  --color-honey-700: #8a6a22;
+
+  --color-sky-700: #3f6a86;
 
   --font-sans: 'Figtree', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-reading: 'Lora', Georgia, 'Times New Roman', serif;
@@ -61,6 +64,32 @@
  * It is a low-light version of the same warm palette, not a neon inversion.
  */
 html[data-theme='dim'] {
+  /* The accent tints have to be redefined too, not just the neutrals. A dim
+     theme whose alert panels and active chips are still pale is worse than no
+     dim theme at all — those are exactly the surfaces that glare in a darkened
+     room. Each tint keeps its hue and swaps its lightness. */
+  --color-sage-50: #24322e;
+  --color-sage-100: #2c403a;
+  --color-sage-200: #395249;
+  --color-sage-600: #9ccbbd;
+  --color-sage-700: #b7dcd0;
+
+  --color-clay-100: #3a2a22;
+  --color-clay-200: #4c372c;
+  --color-clay-300: #7a533d;
+  --color-clay-400: #d59f80;
+  --color-clay-500: #e0b195;
+
+  --color-honey-100: #3a3122;
+  --color-honey-300: #6d5a2f;
+  --color-honey-500: #e3c078;
+  --color-honey-700: #e8cd94;
+
+  --color-sky-100: #26313a;
+  --color-sky-300: #4a677d;
+  --color-sky-500: #8fb7d1;
+  --color-sky-700: #a9c8dd;
+
   --color-linen: #23282a;
   --color-linen-deep: #1b2022;
   --color-paper: #2b3134;

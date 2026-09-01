@@ -184,7 +184,7 @@ export default function App() {
                 <Icon className="w-4 h-4" />
                 <span>{activity.label}</span>
                 {activity.group === 'assess' && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-100 text-[#3f6a86]">measure</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">measure</span>
                 )}
               </button>
             );

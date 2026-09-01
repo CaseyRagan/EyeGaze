@@ -1,6 +1,6 @@
 {
-  "name": "GazeFlow - Eye Tracking & Gaze Canvas",
-  "description": "Magical and accurate eye tracking experience using webcam to draw lines and complete interactive gaze tasks.",
+  "name": "Lantern - Eye Gaze Therapy & Play",
+  "description": "Webcam eye tracking for vision, speech and occupational therapy: guided calibration that reports honest accuracy in degrees, a reading assessment against developmental norms, and games played with the eyes.",
   "requestFramePermissions": [
     "camera"
   ],
