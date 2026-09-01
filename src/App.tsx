@@ -22,7 +22,7 @@ import { CameraPreview } from './components/CameraPreview';
 import { CalibrationFlow } from './components/CalibrationFlow';
 import { RecentreOverlay } from './components/RecentreOverlay';
 import { SettingsPanel } from './components/SettingsPanel';
-import { PostureGuide } from './components/PostureGuide';
+import { HeadAlignmentGuide } from './components/HeadAlignmentGuide';
 import { SessionBar } from './components/SessionBar';
 import { GazePaint } from './components/GazePaint';
 import { ConstellationTask } from './components/Activities/ConstellationTask';
@@ -73,6 +73,10 @@ export default function App() {
   const landmarksRef = useRef<any[] | null>(null);
 
   const [settings, setSettings] = useState<TrackingSettings>({ ...DEFAULT_TRACKING_SETTINGS });
+  // Read by the keyboard handler, which is registered once and must not close
+  // over a stale copy of the settings.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme === 'dim' ? 'dim' : 'light');
@@ -126,11 +130,14 @@ export default function App() {
       } else if (e.key === 'k' || e.key === 'K') {
         e.preventDefault();
         setIsCalibrationOpen(true);
+      } else if (e.key === 'h' || e.key === 'H') {
+        e.preventDefault();
+        handleUpdateSettings({ showPostureGuide: !settingsRef.current.showPostureGuide });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [handleUpdateSettings]);
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (mouseMode) trackerRef.current?.simulateGazeFromPointer(e.clientX, e.clientY);
@@ -145,7 +152,7 @@ export default function App() {
       className="relative w-screen h-screen overflow-hidden flex flex-col bg-[var(--surface)] text-ink"
     >
       <header className="relative z-30 flex items-center justify-between gap-4 px-5 py-3 border-b border-soft bg-[var(--surface-raised)] shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={() => setNavOpen(v => !v)}
             className="lg:hidden p-2 rounded-xl text-ink-soft hover:bg-[var(--surface-sunken)]"
@@ -153,16 +160,20 @@ export default function App() {
           >
             <Menu className="w-5 h-5" />
           </button>
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold text-ink leading-tight">{APP_NAME}</h1>
-            <p className="text-xs text-ink-faint truncate">{activeDefinition.purpose}</p>
+          <div>
+            <h1 className="text-base font-semibold text-ink leading-tight whitespace-nowrap">{APP_NAME}</h1>
+            {/* Decorative, and the first thing worth dropping when the activity
+                tabs need the room. */}
+            <p className="hidden 2xl:block text-xs text-ink-faint truncate max-w-[240px]">
+              {activeDefinition.purpose}
+            </p>
           </div>
         </div>
 
         <nav
           className={`${
             navOpen ? 'flex' : 'hidden'
-          } lg:flex absolute lg:static top-full left-0 right-0 lg:top-auto flex-col lg:flex-row gap-1 p-2 lg:p-0 bg-[var(--surface-raised)] lg:bg-transparent border-b lg:border-0 border-soft lg:min-w-0 lg:overflow-x-auto`}
+          } lg:flex absolute lg:static top-full left-0 right-0 lg:top-auto flex-col lg:flex-row gap-1 p-2 lg:p-0 bg-[var(--surface-raised)] lg:bg-transparent border-b lg:border-0 border-soft lg:shrink-0`}
         >
           {ACTIVITIES.map(activity => {
             const Icon = activity.icon;
@@ -181,10 +192,12 @@ export default function App() {
                     : 'text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)]'
                 }`}
               >
-                <Icon className="w-4 h-4" />
+                <Icon className="w-4 h-4 shrink-0" />
                 <span>{activity.label}</span>
                 {activity.group === 'assess' && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">measure</span>
+                  <span className="hidden 2xl:inline text-[10px] px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">
+                    measure
+                  </span>
                 )}
               </button>
             );
@@ -197,10 +210,10 @@ export default function App() {
           <button
             onClick={() => setIsRecentreOpen(true)}
             title="Re-centre after moving (C)"
-            className="px-3 py-2 rounded-xl text-sm font-medium text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)] transition-colors flex items-center gap-2"
+            className="px-3 py-2 rounded-xl text-sm font-medium text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)] transition-colors flex items-center gap-2 shrink-0"
           >
             <Crosshair className="w-4 h-4" />
-            <span className="hidden xl:inline">Re-centre</span>
+            <span className="hidden 2xl:inline">Re-centre</span>
           </button>
 
           <button
@@ -328,7 +341,7 @@ export default function App() {
       )}
 
       {settings.showPostureGuide && !isCalibrationOpen && !isRecentreOpen && (
-        <PostureGuide variant="compact" onRecentre={() => setIsRecentreOpen(true)} />
+        <HeadAlignmentGuide onRecentre={() => setIsRecentreOpen(true)} />
       )}
 
       <CalibrationFlow

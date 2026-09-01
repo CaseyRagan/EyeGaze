@@ -82,6 +82,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [failedPoints, setFailedPoints] = useState<number[]>([]);
   const [wantHeadPass, setWantHeadPass] = useState(true);
+  const [prunedPoints, setPrunedPoints] = useState<string[]>([]);
   const [headPassOutcome, setHeadPassOutcome] = useState<'pending' | 'measured' | 'skipped' | 'failed'>('pending');
 
   const samplesRef = useRef<CalibrationSample[]>([]);
@@ -300,6 +301,11 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
           if (next < targets.length) {
             beginPoint(next);
           } else if (stage === 'capture') {
+            // Drop any point the rest of the grid clearly disagrees with,
+            // before it gets a chance to distort the head-movement fit and the
+            // accuracy check downstream of it.
+            setPrunedPoints(calibrationEngine.pruneOutlierAnchors().removed);
+
             // The posture held during calibration is what the mapping is tied
             // to, so it becomes the reference for later drift warnings.
             const posture = liveGazeRef.current?.headPose;
@@ -343,6 +349,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     setFailedPoints([]);
     setValidation(null);
     setHeadPassOutcome('pending');
+    setPrunedPoints([]);
     validationResultsRef.current = [];
     framesSeenRef.current = 0;
     framesUsedRef.current = 0;
@@ -427,6 +434,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
       {stage === 'result' && (
         <ResultStage
+          prunedCount={prunedPoints.length}
           headPassOutcome={headPassOutcome}
           validation={validation}
           failedPoints={failedPoints}
@@ -525,7 +533,7 @@ const PositionStage: React.FC<{
       </div>
 
       <div className="space-y-4">
-        <PostureGuide variant="full" />
+        <PostureGuide />
         <div className="surface rounded-2xl p-5">
           <h4 className="text-sm font-semibold text-ink mb-2">What happens next</h4>
           <p className="text-sm text-ink-soft leading-relaxed">
@@ -559,8 +567,18 @@ const CaptureStage: React.FC<{
         {isValidation ? 'Nearly there — look at each dot and hold still.' : 'Look at the middle of the dot and hold still.'}
       </p>
 
+      {/*
+        Positioned against the viewport, not this container.
+
+        Anchors are stored as a fraction of the viewport, and the mapping is
+        applied against window.innerHeight. Laying the dots out inside a flex
+        child that sits below the header meant the client was looking at one
+        place while the model was told they were looking at another — a
+        vertical offset of the header's height at the top of the screen,
+        tapering to nothing at the bottom, baked into every calibration.
+      */}
       <div
-        className="absolute -translate-x-1/2 -translate-y-1/2"
+        className="fixed -translate-x-1/2 -translate-y-1/2"
         style={{ left: `${spec.xPercent}%`, top: `${spec.yPercent}%` }}
       >
         <svg width={80} height={80} className="overflow-visible">
@@ -686,11 +704,12 @@ const GRADE_COPY: Record<ValidationResult['grade'], { label: string; tone: strin
 const ResultStage: React.FC<{
   validation: ValidationResult | null;
   failedPoints: number[];
+  prunedCount: number;
   headPassOutcome: 'pending' | 'measured' | 'skipped' | 'failed';
   onRedo: () => void;
   onRecheck: () => void;
   onAccept: () => void;
-}> = ({ validation, failedPoints, headPassOutcome, onRedo, onRecheck, onAccept }) => {
+}> = ({ validation, failedPoints, prunedCount, headPassOutcome, onRedo, onRecheck, onAccept }) => {
   if (!validation || !Number.isFinite(validation.accuracyDeg)) {
     return (
       <div className="flex-1 flex items-center justify-center px-6">
@@ -790,12 +809,25 @@ const ResultStage: React.FC<{
           </div>
         )}
 
+        {validation.distanceCm !== null && (validation.distanceCm < 32 || validation.distanceCm > 95) && (
+          <div className="rounded-2xl border border-honey-300 bg-honey-100 px-4 py-3">
+            <p className="text-sm text-honey-700 leading-relaxed">
+              The viewing distance came out at {validation.distanceCm.toFixed(0)} cm, which is unlikely
+              to be right. Degrees are computed directly from it, so the figures above are probably
+              scaled wrong — the tracking may well be better than they suggest. Correct the distance in
+              settings and run the check again.
+            </p>
+          </div>
+        )}
+
         <p className="text-xs text-ink-faint leading-relaxed">
           Degrees are worked out from your screen size and a viewing distance of{' '}
           {validation.distanceCm ? `${validation.distanceCm.toFixed(0)} cm` : 'unknown'}
           {validation.distanceWasMeasured ? ', measured from the camera' : ', taken from your settings'}. If the
           screen size in settings is wrong, the degree figures will be wrong with it.
           {failedPoints.length > 0 && ` ${failedPoints.length} set-up point(s) could not be captured and were skipped.`}
+          {prunedCount > 0 &&
+            ` ${prunedCount} set-up point(s) disagreed with the rest of the grid and were dropped — usually a blink or a glance away at the wrong moment.`}
         </p>
 
         <div className="flex flex-wrap gap-3">

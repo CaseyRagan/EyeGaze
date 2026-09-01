@@ -357,6 +357,94 @@ export class CalibrationEngine {
     return { dxPx: dxNorm * screenWidth, dyPx: dyNorm * screenHeight };
   }
 
+  /**
+   * Drops calibration points the rest of the grid disagrees with, then refits.
+   *
+   * A least-squares fit spreads one bad point's error across the whole surface,
+   * so a single moment where the client blinked, looked away, or was still
+   * travelling when the capture began degrades accuracy everywhere — not just
+   * near that point. Leave-one-out error identifies such a point cleanly: fit
+   * without it, and see how far the rest of the grid thinks it should be.
+   *
+   * At most two are removed. Beyond that the problem is the session, not the
+   * points, and quietly deleting half the grid would hide that.
+   */
+  public pruneOutlierAnchors(): { removed: string[]; improvedFrom: number; improvedTo: number } {
+    const removed: string[] = [];
+    const before = this.model.quality?.crossValidatedErrorPx ?? 0;
+
+    for (let round = 0; round < 2; round++) {
+      const anchors = this.getAnchors();
+      if (anchors.length <= 5) break;
+
+      const errors = this.leaveOneOutErrors(anchors);
+      if (errors.length === 0) break;
+
+      const magnitudes = errors.map(e => e.errorPx);
+      const typical = median(magnitudes);
+      let worstIndex = 0;
+      for (let i = 1; i < errors.length; i++) {
+        if (errors[i].errorPx > errors[worstIndex].errorPx) worstIndex = i;
+      }
+      const worst = errors[worstIndex];
+
+      // Both tests have to fire: a point that is merely the worst of a tight
+      // set is not an outlier, and a large error that the whole grid shares is
+      // a bad session rather than a bad point.
+      const isOutlier = worst.errorPx > typical * 2.5 && worst.errorPx > window.innerHeight * 0.08;
+      if (!isOutlier) break;
+
+      this.anchors.delete(worst.id);
+      removed.push(worst.id);
+      this.refit();
+    }
+
+    return {
+      removed,
+      improvedFrom: before,
+      improvedTo: this.model.quality?.crossValidatedErrorPx ?? 0,
+    };
+  }
+
+  /** Per-anchor leave-one-out error in pixels. */
+  private leaveOneOutErrors(anchors: CalibrationAnchor[]): Array<{ id: string; errorPx: number }> {
+    if (anchors.length < 5) return [];
+
+    const screenW = window.innerWidth;
+    const screenH = window.innerHeight;
+    const results: Array<{ id: string; errorPx: number }> = [];
+
+    for (let held = 0; held < anchors.length; held++) {
+      const subset = anchors.filter((_, i) => i !== held);
+      const degree = featureDegreeForAnchorCount(subset.length);
+      const reference: FeaturePosture = {
+        yaw: median(subset.map(a => a.headYaw)),
+        pitch: median(subset.map(a => a.headPitch)),
+        translateX: median(subset.map(a => a.headTranslateX)),
+        translateY: median(subset.map(a => a.headTranslateY)),
+      };
+      const fitted = this.fitWithGain(subset, degree, reference, this.model.headGain ?? NOMINAL_HEAD_GAIN);
+      if (!fitted) continue;
+
+      const a = anchors[held];
+      const p = this.predictNormalised(
+        fitted,
+        a.gx,
+        a.gy,
+        a.headYaw,
+        a.headPitch,
+        a.headTranslateX,
+        a.headTranslateY
+      );
+      results.push({
+        id: a.id,
+        errorPx: Math.hypot((p.x - a.xNorm) * screenW, (p.y - a.yNorm) * screenH),
+      });
+    }
+
+    return results;
+  }
+
   /** Records the head pose that was held during calibration, for drift detection. */
   public recordPosture(headPose: HeadPose) {
     this.model.posture = {
@@ -419,7 +507,7 @@ export class CalibrationEngine {
       isCalibrated: true,
       lastCalibratedAt: Date.now(),
       regression,
-      quality: this.computeQuality(anchors, degree),
+      quality: this.computeQuality(anchors),
     };
     this.save();
     this.emit();
@@ -601,28 +689,10 @@ export class CalibrationEngine {
    * model lands on it. This is the only calibration number worth showing a
    * clinician, because it is the only one the model could not simply memorise.
    */
-  private computeQuality(anchors: CalibrationAnchor[], degree: number): CalibrationQuality {
-    const screenW = window.innerWidth;
-    const screenH = window.innerHeight;
-
-    let errorSum = 0;
-    let counted = 0;
-
-    if (anchors.length >= 5) {
-      for (let held = 0; held < anchors.length; held++) {
-        const subset = anchors.filter((_, i) => i !== held);
-        const subDegree = Math.min(degree, featureDegreeForAnchorCount(subset.length));
-        const fitted = this.fitRegression(subset, subDegree);
-        if (!fitted) continue;
-
-        const a = anchors[held];
-        const predicted = this.predictNormalised(fitted, a.gx, a.gy, a.headYaw, a.headPitch, a.headTranslateX, a.headTranslateY);
-        errorSum += Math.hypot((predicted.x - a.xNorm) * screenW, (predicted.y - a.yNorm) * screenH);
-        counted++;
-      }
-    }
-
-    const crossValidatedErrorPx = counted > 0 ? errorSum / counted : 0;
+  private computeQuality(anchors: CalibrationAnchor[]): CalibrationQuality {
+    const looErrors = this.leaveOneOutErrors(anchors);
+    const crossValidatedErrorPx =
+      looErrors.length > 0 ? looErrors.reduce((sum, e) => sum + e.errorPx, 0) / looErrors.length : 0;
 
     // Coverage: how much of the screen the anchors actually span.
     const xs = anchors.map(a => a.xNorm);

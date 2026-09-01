@@ -1,82 +1,27 @@
 import React from 'react';
-import { AlertTriangle, Check, MoveHorizontal, Ruler } from 'lucide-react';
+import { Ruler } from 'lucide-react';
 import { PostureDrift } from '../types';
 import { calibrationEngine } from '../services/calibration';
 import { useThrottledGaze } from '../services/gazeBus';
-import { viewingGeometry } from '../services/viewingGeometry';
-
-interface PostureGuideProps {
-  /** Full shows the framing box; compact is the persistent corner readout. */
-  variant?: 'compact' | 'full';
-  onRecentre?: () => void;
-}
 
 /**
- * Live feedback on where the head is, compared with where it was at calibration.
+ * The head-position picture shown during set-up.
  *
- * This exists because on a built-in webcam, head *translation* — not rotation,
- * and not distance — is usually the largest single source of drift. Sliding
- * three centimetres sideways at a typical 55 cm viewing distance changes the
- * eye rotation needed to fixate the same point by roughly three degrees, which
- * is larger than the entire error budget of a good webcam calibration. A chin
- * or forehead rest removes that term almost entirely; this panel is what you
- * use when there isn't one.
+ * Its persistent counterpart during a session is HeadAlignmentGuide, which
+ * draws the same target on a canvas so it can stay on screen while an activity
+ * runs without costing anything.
  */
-export const PostureGuide: React.FC<PostureGuideProps> = ({ variant = 'compact', onRecentre }) => {
+export const PostureGuide: React.FC = () => {
   const gaze = useThrottledGaze(8);
   const drift: PostureDrift | null = gaze ? calibrationEngine.getPostureDrift(gaze.headPose) : null;
-  const distanceCm = gaze?.headPose.distanceCm ?? null;
-  const measured = viewingGeometry.isDistanceMeasured();
-
-  if (variant === 'full') {
-    return <FullGuide drift={drift} distanceCm={distanceCm} gazeTx={gaze?.headPose.translateX ?? 0} gazeTy={gaze?.headPose.translateY ?? 0} />;
-  }
-
-  if (!drift) return null;
-
-  const tone =
-    drift.severity === 'good'
-      ? { bg: 'bg-sage-50', border: 'border-sage-200', text: 'text-sage-700', icon: Check }
-      : drift.severity === 'drifting'
-      ? { bg: 'bg-honey-100', border: 'border-honey-300', text: 'text-honey-700', icon: MoveHorizontal }
-      : { bg: 'bg-clay-100', border: 'border-clay-300', text: 'text-clay-500', icon: AlertTriangle };
-
-  const Icon = tone.icon;
-
-  const message =
-    drift.severity === 'good'
-      ? 'Position is steady'
-      : drift.severity === 'drifting'
-      ? 'Drifting from your set-up position'
-      : 'Moved a long way — accuracy will have suffered';
 
   return (
-    <div className={`fixed left-5 bottom-5 z-30 rounded-2xl border ${tone.bg} ${tone.border} px-4 py-3 max-w-[280px]`}>
-      <div className="flex items-start gap-2.5">
-        <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${tone.text}`} />
-        <div className="min-w-0">
-          <p className={`text-sm font-medium ${tone.text}`}>{message}</p>
-          <p className="text-xs text-ink-soft mt-1 leading-relaxed">
-            {drift.lateralCm >= 1.5 && `${drift.lateralCm.toFixed(1)} cm sideways. `}
-            {Math.abs(drift.depthCm) >= 3 &&
-              `${Math.abs(drift.depthCm).toFixed(0)} cm ${drift.depthCm > 0 ? 'further away' : 'closer'}. `}
-            {drift.rotationDeg >= 4 && `Head turned ${drift.rotationDeg.toFixed(0)}°. `}
-            {drift.severity === 'good' && distanceCm && `About ${distanceCm.toFixed(0)} cm from the screen.`}
-          </p>
-          {drift.severity !== 'good' && onRecentre && (
-            <button
-              onClick={onRecentre}
-              className="mt-2 text-xs font-medium text-sage-600 hover:text-sage-700 underline underline-offset-2"
-            >
-              Re-centre in five seconds
-            </button>
-          )}
-        </div>
-      </div>
-      {!measured && (
-        <p className="text-[11px] text-ink-faint mt-2 pl-6">Distance is estimated from your settings.</p>
-      )}
-    </div>
+    <FullGuide
+      drift={drift}
+      distanceCm={gaze?.headPose.distanceCm ?? null}
+      gazeTx={gaze?.headPose.translateX ?? 0}
+      gazeTy={gaze?.headPose.translateY ?? 0}
+    />
   );
 };
 

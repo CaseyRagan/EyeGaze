@@ -113,9 +113,37 @@ function measureEye(landmarks: any[], spec: typeof EYE_A, basisU: Vec2, basisV: 
 }
 
 /**
- * Decomposes MediaPipe's 4×4 facial transformation matrix (column-major,
- * canonical-face-to-camera) into intrinsic yaw-pitch-roll and a translation.
- * Returns null when the matrix is absent or degenerate.
+ * MediaPipe hands back a 4x4 transform as a flat array with no layout flag.
+ *
+ * The underlying MatrixData proto has a `layout` field, but the JavaScript
+ * wrapper reads only rows, columns and the packed data and drops it — so the
+ * ordering has to be established from the numbers themselves rather than
+ * assumed. Guessing wrong is not a subtle error: it transposes the rotation,
+ * which swaps yaw with pitch and inverts their signs, and it reads the
+ * translation out of a row of zeros.
+ *
+ * A rigid transform makes this unambiguous. Written column-major, elements
+ * 3, 7 and 11 are the zero row; written row-major, elements 12, 13 and 14 are.
+ * Exactly one of those holds for a real transform.
+ */
+type MatrixLayout = 'column-major' | 'row-major';
+
+function detectMatrixLayout(m: Float32Array | number[]): MatrixLayout | null {
+  const nearZero = (v: number) => Math.abs(v) < 1e-4;
+
+  const columnMajor = nearZero(m[3]) && nearZero(m[7]) && nearZero(m[11]);
+  const rowMajor = nearZero(m[12]) && nearZero(m[13]) && nearZero(m[14]);
+
+  // A transform sitting at the origin would satisfy both; neither reading of it
+  // carries any information, so there is nothing to choose between them.
+  if (columnMajor === rowMajor) return null;
+  return columnMajor ? 'column-major' : 'row-major';
+}
+
+/**
+ * Decomposes the facial transformation matrix (canonical-face-to-camera) into
+ * intrinsic yaw-pitch-roll and a distance. Returns null when the matrix is
+ * absent, degenerate, or of an ordering we cannot establish.
  */
 function decomposeTransform(matrix?: Float32Array | number[]): {
   yaw: number;
@@ -125,23 +153,34 @@ function decomposeTransform(matrix?: Float32Array | number[]): {
 } | null {
   if (!matrix || matrix.length < 16) return null;
 
-  const r00 = matrix[0], r10 = matrix[1], r20 = matrix[2];
-  const r11 = matrix[5], r12 = matrix[9];
-  const r02 = matrix[8], r22 = matrix[10];
-  const tz = matrix[14];
+  const layout = detectMatrixLayout(matrix);
+  if (!layout) return null;
 
-  if (![r00, r10, r20, r11, r12, r02, r22, tz].every(Number.isFinite)) return null;
+  // r(row, col), whichever way the data is packed.
+  const r =
+    layout === 'column-major'
+      ? (row: number, col: number) => matrix[col * 4 + row]
+      : (row: number, col: number) => matrix[row * 4 + col];
 
-  const clampedPitch = Math.max(-1, Math.min(1, -r12));
+  const tz = layout === 'column-major' ? matrix[14] : matrix[11];
+
+  const r10 = r(1, 0);
+  const r11 = r(1, 1);
+  const r12 = r(1, 2);
+  const r02 = r(0, 2);
+  const r22 = r(2, 2);
+
+  if (![r10, r11, r12, r02, r22, tz].every(Number.isFinite)) return null;
+
   const yaw = Math.atan2(r02, r22);
-  const pitch = Math.asin(clampedPitch);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, -r12)));
   const roll = Math.atan2(r10, r11);
 
-  // The canonical face model is expressed in centimetres, so the translation's
-  // depth component is directly a distance estimate.
-  const distanceCm = Math.abs(tz);
-
-  return { yaw, pitch, roll, distanceCm };
+  // The canonical face model is expressed in centimetres, so the depth
+  // component of the translation is directly a distance estimate — subject to
+  // MediaPipe's assumed camera intrinsics, which is why it is cross-checked
+  // against the iris measurement below rather than trusted outright.
+  return { yaw, pitch, roll, distanceCm: Math.abs(tz) };
 }
 
 export interface ExtractionResult {
@@ -225,20 +264,54 @@ export function extractGazeFeatures(
     }
   }
 
-  // Distance: prefer the face model, fall back to the apparent iris size, which
-  // works because the iris is very nearly the same physical size in everyone.
-  let distanceCm: number | null = decomposed?.distanceCm ?? null;
+  // --- Distance -------------------------------------------------------------
+  // Two independent estimates, neither of which is trustworthy alone.
+  //
+  // The face model's translation rests on camera intrinsics MediaPipe assumes
+  // rather than measures. The iris measurement rests on the iris being very
+  // nearly the same physical size in every adult — which is true — but divides
+  // by an assumed field of view, which varies a lot between webcams.
+  //
+  // So they are cross-checked. Agreement is good evidence both are close;
+  // disagreement means the camera is not what one of them assumed, and the
+  // result is reported as unreliable rather than averaged into a confident
+  // wrong answer. Every accuracy figure in degrees scales with this number, so
+  // quietly picking one is how a tool ends up reporting nine degrees of error
+  // for a two degree problem.
   const irisRadii = [eyeA?.irisRadius, eyeB?.irisRadius].filter(
     (r): r is number => typeof r === 'number' && r > 1e-4
   );
-  const irisDiameterNorm = irisRadii.length > 0 ? (irisRadii.reduce((a, b) => a + b, 0) / irisRadii.length) * 2 : 0;
+  const irisDiameterNorm =
+    irisRadii.length > 0 ? (irisRadii.reduce((a, b) => a + b, 0) / irisRadii.length) * 2 : 0;
 
-  if ((distanceCm === null || distanceCm < 15 || distanceCm > 200) && irisDiameterNorm > 1e-4) {
+  const plausible = (v: number | null | undefined): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 15 && v <= 200 ? v : null;
+
+  const modelDistance = plausible(decomposed?.distanceCm);
+
+  let irisDistance: number | null = null;
+  if (irisDiameterNorm > 1e-4) {
     const focalPx = 0.5 / Math.tan((ASSUMED_HFOV_DEG * Math.PI) / 360);
-    distanceCm = (focalPx * IRIS_DIAMETER_MM) / (irisDiameterNorm * 10);
+    irisDistance = plausible((focalPx * IRIS_DIAMETER_MM) / (irisDiameterNorm * 10));
   }
-  if (distanceCm !== null && (!Number.isFinite(distanceCm) || distanceCm < 15 || distanceCm > 200)) {
+
+  let distanceCm: number | null;
+  let distanceAgreement: number;
+
+  if (modelDistance !== null && irisDistance !== null) {
+    const ratio = modelDistance / irisDistance;
+    // 1 is perfect agreement; this falls to 0 by the time they differ by 2x.
+    distanceAgreement = Math.max(0, 1 - Math.abs(Math.log(ratio)) / Math.log(2));
+    distanceCm = distanceAgreement > 0.5 ? (modelDistance + irisDistance) / 2 : irisDistance;
+  } else if (irisDistance !== null) {
+    distanceCm = irisDistance;
+    distanceAgreement = 0.4;
+  } else if (modelDistance !== null) {
+    distanceCm = modelDistance;
+    distanceAgreement = 0.4;
+  } else {
     distanceCm = null;
+    distanceAgreement = 0;
   }
 
   const faceCentre: Vec2 = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
@@ -250,6 +323,7 @@ export function extractGazeFeatures(
     translateX: faceCentre.x - 0.5,
     translateY: faceCentre.y - 0.5,
     distanceCm,
+    distanceAgreement,
     interocularSpan: span,
   };
 

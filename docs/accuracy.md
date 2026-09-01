@@ -199,6 +199,49 @@ Measured there on a curved synthetic eye with realistic landmark noise:
 which is why the set-up screen describes five points as good enough for the
 games but not for measuring.
 
+## Things that quietly broke it, and how they were found
+
+Worth recording, because each one produced plausible-looking numbers rather than
+an obvious failure.
+
+**The reported degrees were three times too large.** A real session reported
+9.3 degrees of error at 163 px. Working backwards through the pixels-to-degrees
+conversion, that implied a viewing distance of about 18 cm — impossible. The
+tracking was roughly 3 degrees; the *reporting* was wrong. Both distance
+estimates divide by an assumed camera field of view, and webcams vary enough
+that the raw figure can be out by a large factor. They are now cross-checked
+against each other, the measurement is refused when they disagree, and the user
+can anchor it with one tape-measure reading in settings.
+
+The lesson generalises: an accuracy figure in degrees is a claim about physical
+geometry, and it is only as good as the two physical numbers underneath it.
+
+**The transformation matrix was being read in the wrong order.** MediaPipe's
+`MatrixData` proto carries a `layout` field; the JavaScript wrapper reads rows,
+columns and data, and drops it. Assuming column-major when the data is row-major
+transposes the rotation — which swaps yaw with pitch and inverts their signs —
+and reads the translation out of a row of zeros. The layout is now detected from
+the numbers: a rigid transform has its zero row at elements 3, 7, 11 written one
+way and at 12, 13, 14 written the other, and exactly one of those holds.
+
+**The calibration dots were drawn in the wrong coordinate space.** They were
+positioned as a percentage of a flex container sitting below the header, while
+anchors were stored as a fraction of the viewport. Every calibration therefore
+learned a vertical offset of the header's height at the top of the screen,
+tapering to nothing at the bottom. It was invisible in validation, because the
+check inherited the same offset and cancelled it — the sort of bug that only
+shows up when you make the test space and the production space differ. Caught by
+driving the calibration in mouse-simulation mode, where the reported error
+should be exactly zero and was 0.9 degrees.
+
+**One bad point was contaminating the whole surface.** Least squares spreads a
+single bad anchor's error across the entire fit, so a blink or a glance away at
+the wrong moment degraded accuracy everywhere, not just near that point.
+Leave-one-out error identifies such a point cleanly, and `pruneOutlierAnchors`
+drops at most two of them. On synthetic data with one point captured while the
+client looked at the opposite corner, this takes the result from 2.06 to 0.85
+degrees; on a clean grid it removes nothing.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
@@ -212,5 +255,7 @@ games but not for measuring.
   estimate. A high accuracy figure computed from 40% of frames is not
   trustworthy, so this is always shown alongside.
 
-Degrees depend on the screen diagonal entered in settings. If that is wrong, the
-degree figures are wrong with it, and the UI says so.
+Degrees depend on two physical numbers: the screen diagonal entered in settings,
+and the viewing distance. If either is wrong, every degree figure is wrong with
+it, and the UI says so — and warns outright when the distance comes out somewhere
+a person could not actually be sitting.

@@ -49,7 +49,7 @@ export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => 
     : 'Moving';
 
   return (
-    <div className="hidden lg:flex items-center gap-1">
+    <div className="hidden xl:flex items-center gap-1">
       <button
         onClick={onOpenCalibration}
         className="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-[var(--surface-sunken)] transition-colors"

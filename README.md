@@ -41,6 +41,13 @@ whether camera angle matters. Short version:
   a chin rest would have bought you.
 - Nine points for a session, thirteen before a reading assessment. Five points is
   worth roughly 2–3° — fine for the games, not for measuring anything.
+- Check the viewing distance in settings once. Accuracy in degrees is computed
+  from it, so an estimate that is out by a factor of two reports twice the error
+  you actually have.
+
+The head-position guide stays on screen during a session so anyone who shifts,
+or looks away and back, can line up again without redoing set-up. Press **H** to
+toggle it, **C** to re-centre after a big move, **K** to run set-up again.
 
 The check step after calibration measures error at five points the model was
 never fitted on, so the figure it reports cannot flatter itself. Everything the

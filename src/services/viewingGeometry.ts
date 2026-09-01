@@ -22,6 +22,15 @@ export interface ViewingGeometrySettings {
   assumedDistanceCm: number;
   /** When true, the live face-model distance overrides the assumed distance. */
   useMeasuredDistance: boolean;
+  /**
+   * Correction applied to the raw measured distance.
+   *
+   * Both distance estimates divide by an assumed camera field of view, and
+   * webcams vary enough that the raw figure can be out by a factor of two or
+   * more. One measurement from the user with a tape measure anchors it, after
+   * which relative changes track correctly and the absolute value is real.
+   */
+  distanceScale: number;
 }
 
 const DEFAULTS: ViewingGeometrySettings = {
@@ -30,11 +39,16 @@ const DEFAULTS: ViewingGeometrySettings = {
   screenDiagonalInches: 15.6,
   assumedDistanceCm: 55,
   useMeasuredDistance: true,
+  distanceScale: 1,
 };
+
+/** Below this agreement between the two estimates, the measurement is not used. */
+const MIN_DISTANCE_AGREEMENT = 0.5;
 
 class ViewingGeometry {
   private settings: ViewingGeometrySettings = { ...DEFAULTS };
   private measuredDistanceCm: number | null = null;
+  private measurementAgreement = 0;
 
   constructor() {
     this.load();
@@ -49,28 +63,61 @@ class ViewingGeometry {
     this.save();
   }
 
-  /** Called by the tracker with the live face-model distance estimate. */
-  public setMeasuredDistanceCm(distanceCm: number | null) {
-    this.measuredDistanceCm =
-      distanceCm !== null && Number.isFinite(distanceCm) && distanceCm > 15 && distanceCm < 200
-        ? distanceCm
-        : null;
+  /** Called by the tracker with the live distance estimate and its confidence. */
+  public setMeasuredDistanceCm(distanceCm: number | null, agreement = 0) {
+    const valid =
+      distanceCm !== null && Number.isFinite(distanceCm) && distanceCm > 15 && distanceCm < 200;
+    this.measuredDistanceCm = valid ? distanceCm : null;
+    this.measurementAgreement = valid ? agreement : 0;
   }
 
-  public getMeasuredDistanceCm(): number | null {
+  /** The raw measurement, before the user's correction. */
+  public getRawMeasuredDistanceCm(): number | null {
     return this.measuredDistanceCm;
+  }
+
+  /** The measurement after the user's correction, or null if unusable. */
+  public getMeasuredDistanceCm(): number | null {
+    if (this.measuredDistanceCm === null) return null;
+    return this.measuredDistanceCm * this.settings.distanceScale;
+  }
+
+  /** How closely the two independent estimates agreed, 0-1. */
+  public getMeasurementAgreement(): number {
+    return this.measurementAgreement;
+  }
+
+  /**
+   * Anchors the distance estimate to a real measurement. The user reports how
+   * far they actually are; everything after that is scaled to match.
+   */
+  public calibrateDistance(actualCm: number): boolean {
+    if (this.measuredDistanceCm === null || actualCm < 20 || actualCm > 150) return false;
+    const scale = actualCm / this.measuredDistanceCm;
+    if (!Number.isFinite(scale) || scale < 0.2 || scale > 5) return false;
+    this.updateSettings({ distanceScale: scale });
+    return true;
   }
 
   /** The distance actually used for conversions, in cm. */
   public getEffectiveDistanceCm(): number {
-    if (this.settings.useMeasuredDistance && this.measuredDistanceCm !== null) {
-      return this.measuredDistanceCm;
+    const measured = this.getMeasuredDistanceCm();
+    if (
+      this.settings.useMeasuredDistance &&
+      measured !== null &&
+      this.measurementAgreement >= MIN_DISTANCE_AGREEMENT
+    ) {
+      return measured;
     }
     return this.settings.assumedDistanceCm;
   }
 
   public isDistanceMeasured(): boolean {
-    return this.settings.useMeasuredDistance && this.measuredDistanceCm !== null;
+    return (
+      this.settings.useMeasuredDistance &&
+      this.getMeasuredDistanceCm() !== null &&
+      this.measurementAgreement >= MIN_DISTANCE_AGREEMENT
+    );
   }
 
   /**

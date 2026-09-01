@@ -167,7 +167,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     const headPose = {
       yaw: 0, pitch: 0, roll: 0,
       translateX: 0, translateY: 0,
-      distanceCm: 55, interocularSpan: 0.1,
+      distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1,
     };
 
     let sumErrorPx = 0;
@@ -237,7 +237,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       const mapped = engine.mapToScreen(
         truth.gx,
         truth.gy,
-        { yaw: posture.yaw, pitch: posture.pitch, roll: 0, translateX: posture.translateX, translateY: posture.translateY, distanceCm: 55, interocularSpan: 0.1 },
+        { yaw: posture.yaw, pitch: posture.pitch, roll: 0, translateX: posture.translateX, translateY: posture.translateY, distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1 },
         WIDTH,
         HEIGHT
       )!;
@@ -319,6 +319,76 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   );
   console.log(
     `${compensationOk ? 'ok  ' : 'FAIL'}  with head-movement pass, head moved       ${variedAfterMove.toFixed(2)}°  (compensation working)`
+  );
+}
+
+/**
+ * Outlier rejection.
+ *
+ * One point captured while the client was looking somewhere else — a blink, a
+ * glance at the therapist, a capture that began before the saccade landed. A
+ * least-squares fit spreads that error over the whole surface, so the damage is
+ * not confined to the corner it happened in.
+ */
+{
+  reseed();
+  const engine = new CalibrationEngine();
+  engine.reset();
+
+  const grid = GRIDS['9-point'];
+  grid.forEach(([x, y], i) => {
+    // Point 3 is captured while the client was actually looking at the far
+    // opposite corner of the screen.
+    const [ax, ay] = i === 3 ? [0.85, 0.85] : [x, y];
+    engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(ax, ay, 0.0016));
+  });
+
+  const headPose = {
+    yaw: 0, pitch: 0, roll: 0,
+    translateX: 0, translateY: 0,
+    distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1,
+  };
+
+  const measure = () => {
+    let sum = 0;
+    for (const [x, y] of TEST_POINTS) {
+      const truth = trueFeatureFor(x, y);
+      const mapped = engine.mapToScreen(truth.gx, truth.gy, headPose, WIDTH, HEIGHT)!;
+      sum += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
+    }
+    return viewingGeometry.pixelsToDegrees(sum / TEST_POINTS.length);
+  };
+
+  const beforePrune = measure();
+  const result = engine.pruneOutlierAnchors();
+  const afterPrune = measure();
+
+  const foundIt = result.removed.includes('p3');
+  const improved = afterPrune < beforePrune * 0.6;
+  if (!foundIt || !improved) failures++;
+
+  console.log(
+    `${foundIt ? 'ok  ' : 'FAIL'}  outlier point identified                  removed [${result.removed.join(', ')}], expected p3`
+  );
+  console.log(
+    `${improved ? 'ok  ' : 'FAIL'}  outlier removal improved accuracy         ${beforePrune.toFixed(2)}° -> ${afterPrune.toFixed(2)}°`
+  );
+}
+
+// A clean grid must survive pruning untouched — a rejection rule that eats good
+// points is worse than none.
+{
+  reseed();
+  const engine = new CalibrationEngine();
+  engine.reset();
+  GRIDS['9-point'].forEach(([x, y], i) => {
+    engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, 0.0016));
+  });
+  const result = engine.pruneOutlierAnchors();
+  const untouched = result.removed.length === 0;
+  if (!untouched) failures++;
+  console.log(
+    `${untouched ? 'ok  ' : 'FAIL'}  clean grid left alone by pruning          removed ${result.removed.length} point(s)`
   );
 }
 

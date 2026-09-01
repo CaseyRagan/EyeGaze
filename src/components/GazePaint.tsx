@@ -169,7 +169,8 @@ export const GazePaint: React.FC<GazePaintProps> = ({ settings, onUpdateSettings
       if (e.code === 'Space') {
         e.preventDefault();
         togglePause();
-      } else if (e.key === 'h' || e.key === 'H') {
+      } else if (e.key === 'm' || e.key === 'M') {
+        // H is the global head-guide toggle, so the heatmap uses M for map.
         setShowHeatmap(v => !v);
       }
     };

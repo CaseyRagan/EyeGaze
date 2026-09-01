@@ -319,7 +319,7 @@ export class FaceMeshTracker {
 
     const { features, headPose } = extracted;
     this.lastHeadPose = headPose;
-    viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm);
+    viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm, headPose.distanceAgreement);
 
     // --- Blink bookkeeping ---------------------------------------------------
     const blinkingBoth = features.isBlinkingBoth;
@@ -569,6 +569,7 @@ export class FaceMeshTracker {
           translateX: 0,
           translateY: 0,
           distanceCm: null,
+          distanceAgreement: 0,
           interocularSpan: 0,
         },
       timestamp: args.now,
@@ -652,6 +653,7 @@ export class FaceMeshTracker {
       translateX: 0,
       translateY: 0,
       distanceCm: viewingGeometry.getSettings().assumedDistanceCm,
+      distanceAgreement: 1,
       interocularSpan: 0.1,
     };
 

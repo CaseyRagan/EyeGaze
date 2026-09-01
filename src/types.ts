@@ -17,6 +17,8 @@ export interface HeadPose {
   translateY: number;
   /** Estimated eye-to-camera distance in cm, or null when not measurable. */
   distanceCm: number | null;
+  /** 0-1. How closely the two independent distance estimates agreed. */
+  distanceAgreement: number;
   /** Distance between the eye centres in normalised image units. */
   interocularSpan: number;
 }
