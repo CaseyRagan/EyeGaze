@@ -1,493 +1,420 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Activity, 
-  Camera, 
-  Compass, 
-  Eye, 
-  Focus,
-  HelpCircle,
-  MessageSquare, 
-  MousePointer, 
-  PenTool, 
-  RefreshCw, 
-  Settings, 
-  Sparkles, 
-  Star, 
-  Target, 
-  Video, 
-  VideoOff, 
-  Zap,
-  BrainCircuit
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  BookOpen,
+  Camera,
+  Compass,
+  Crosshair,
+  Menu,
+  MessageSquare,
+  MousePointer,
+  PenLine,
+  RefreshCw,
+  Settings,
+  Sparkles,
+  Target,
 } from 'lucide-react';
-import { ActivityMode, GazeState, TrackingSettings } from './types';
-import { FaceMeshTracker, TrackerStatus } from './services/faceMeshTracker';
+import { ActivityMode, TrackingSettings } from './types';
+import { DEFAULT_TRACKING_SETTINGS, FaceMeshTracker, TrackerStatus } from './services/faceMeshTracker';
 import { calibrationEngine } from './services/calibration';
+import { viewingGeometry } from './services/viewingGeometry';
 import { soundEngine } from './services/audio';
-import { GazeCursor } from './components/GazeCursor';
-import { CameraFeed } from './components/CameraFeed';
-import { CalibrationModal } from './components/CalibrationModal';
-import { CenterCalibrationGate } from './components/CenterCalibrationGate';
-import { SettingsModal } from './components/SettingsModal';
-import { DrawingCanvas } from './components/DrawingCanvas';
+import { GazePointer } from './components/GazePointer';
+import { CameraPreview } from './components/CameraPreview';
+import { CalibrationFlow } from './components/CalibrationFlow';
+import { RecentreOverlay } from './components/RecentreOverlay';
+import { SettingsPanel } from './components/SettingsPanel';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { HeadAlignmentGuide } from './components/HeadAlignmentGuide';
+import { SessionBar } from './components/SessionBar';
+import { GazePaint } from './components/GazePaint';
 import { ConstellationTask } from './components/Activities/ConstellationTask';
 import { GazeMazeTask } from './components/Activities/GazeMazeTask';
 import { TargetPopTask } from './components/Activities/TargetPopTask';
 import { GazeTypingTask } from './components/Activities/GazeTypingTask';
-import { ReadingAnalysisTask } from './components/ReadingAnalysisTask';
-import { StatsBar } from './components/StatsBar';
+import { ReadingAssessment } from './components/ReadingAssessment';
+
+/** One place to change the product name. */
+const APP_NAME = 'Lantern';
+
+interface ActivityDefinition {
+  id: ActivityMode;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  group: 'play' | 'assess';
+  /** Shown under the title on first arrival, in plain language. */
+  purpose: string;
+}
+
+const ACTIVITIES: ActivityDefinition[] = [
+  { id: 'target_pop', label: 'Find and hold', icon: Target, group: 'play', purpose: 'Locate a target and hold your gaze on it.' },
+  { id: 'constellation', label: 'Join the dots', icon: Sparkles, group: 'play', purpose: 'Move accurately from one point to the next.' },
+  { id: 'maze', label: 'Maze', icon: Compass, group: 'play', purpose: 'Follow a path smoothly without straying.' },
+  { id: 'single_line', label: 'Draw', icon: PenLine, group: 'play', purpose: 'Free drawing with your eyes.' },
+  { id: 'quick_type', label: 'Talk', icon: MessageSquare, group: 'play', purpose: 'Spell words by looking at letters.' },
+  { id: 'reading_analysis', label: 'Reading', icon: BookOpen, group: 'assess', purpose: 'Measure reading eye movements against developmental norms.' },
+];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActivityMode>('single_line');
+  const [activeTab, setActiveTab] = useState<ActivityMode>('target_pop');
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus>('uninitialized');
   const [trackerError, setTrackerError] = useState<string | null>(null);
-  const [gaze, setGaze] = useState<GazeState | null>(null);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
-  const [landmarks, setLandmarks] = useState<any[] | null>(null);
-  const [showMeshOverlay, setShowMeshOverlay] = useState(true);
+  const [showMesh, setShowMesh] = useState(true);
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
-  const [isCenterGateOpen, setIsCenterGateOpen] = useState(true);
+  const [isRecentreOpen, setIsRecentreOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [mouseSimMode, setMouseSimMode] = useState(false);
-  const [fps, setFps] = useState(60);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
+  const [mouseMode, setMouseMode] = useState(false);
+  const [theme, setTheme] = useState<'light' | 'dim'>('light');
+  const [toast, setToast] = useState<string | null>(null);
+  const [showWelcome, setShowWelcome] = useState(!calibrationEngine.isCalibrated());
+  const [navOpen, setNavOpen] = useState(false);
 
   const trackerRef = useRef<FaceMeshTracker | null>(null);
-  const fpsFrameCount = useRef(0);
-  const lastFpsTime = useRef(Date.now());
+  // Landmarks go into a ref, not state: they arrive with every captured frame,
+  // and putting them in state re-rendered the entire application at camera rate.
+  const landmarksRef = useRef<any[] | null>(null);
 
-  const [settings, setSettings] = useState<TrackingSettings>({
-    smoothingFactor: 0.18,
-    oneEuroMinCutoff: 0.8,
-    oneEuroBeta: 0.04,
-    saccadeThreshold: 45,
-    sensitivityX: 1.3,
-    sensitivityY: 1.3,
-    deadzone: 5,
-    nudgeOffsetX: 0,
-    nudgeOffsetY: 0,
-    trackingEngineMode: 'hybrid_gaze',
-    magneticSnapAssist: true,
-    snapToGrid: false,
-    gridSnapSize: 40,
-    dwellDurationMs: 800,
-    invertX: false,
-    invertY: false,
-    useHeadCompensation: true,
-    useQuadraticMapping: true,
-    penMode: 'auto_stream',
-    audioEnabled: true,
-    showWebcamPiP: true,
-    showLandmarkMesh: true,
-    showGazeTrail: true,
-    showGazeReticle: true,
-    strokeColor: '#10b981',
-    strokeGlowColor: '#059669',
-    strokeWidth: 6,
-  });
+  const [settings, setSettings] = useState<TrackingSettings>({ ...DEFAULT_TRACKING_SETTINGS });
+  // Read by the keyboard handler, which is registered once and must not close
+  // over a stale copy of the settings.
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
-  // Initialize eye tracker on mount
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme === 'dim' ? 'dim' : 'light');
+  }, [theme]);
+
   useEffect(() => {
     const tracker = new FaceMeshTracker({
       onStatusChange: (status, errorMsg) => {
         setTrackerStatus(status);
-        if (errorMsg) setTrackerError(errorMsg);
-      },
-      onGazeUpdate: (newGaze) => {
-        setGaze(newGaze);
-
-        // FPS tracking
-        fpsFrameCount.current++;
-        const now = Date.now();
-        if (now - lastFpsTime.current >= 1000) {
-          setFps(fpsFrameCount.current);
-          fpsFrameCount.current = 0;
-          lastFpsTime.current = now;
-        }
+        setTrackerError(errorMsg ?? null);
       },
       onVideoFrame: (video, frameLandmarks) => {
-        setVideoElement(video);
-        setLandmarks(frameLandmarks);
+        landmarksRef.current = frameLandmarks ?? null;
+        setVideoElement(prev => (prev === video ? prev : video));
       },
     });
 
     trackerRef.current = tracker;
+    tracker.updateSettings(settings);
     tracker.initialize();
 
-    return () => {
-      tracker.dispose();
-    };
+    return () => tracker.dispose();
+    // Deliberately runs once: the tracker owns the camera for the session and
+    // receives setting changes through updateSettings rather than by restarting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Global keyboard shortcuts (C for Re-Zero Center, K for Calibration)
+  const handleUpdateSettings = useCallback((patch: Partial<TrackingSettings>) => {
+    setSettings(prev => {
+      const next = { ...prev, ...patch };
+      trackerRef.current?.updateSettings(next);
+      return next;
+    });
+  }, []);
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(null), 3200);
+  }, []);
+
+  // Keyboard shortcuts, chosen so a clinician can drive the session without
+  // looking away from the client.
   useEffect(() => {
-    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+    const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
       if (e.key === 'c' || e.key === 'C') {
         e.preventDefault();
-        setIsCenterGateOpen(true);
-        soundEngine.playChime(540, 0.15);
+        setIsRecentreOpen(true);
+      } else if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        setIsCalibrationOpen(true);
+      } else if (e.key === 'h' || e.key === 'H') {
+        e.preventDefault();
+        handleUpdateSettings({ showPostureGuide: !settingsRef.current.showPostureGuide });
       }
     };
-    window.addEventListener('keydown', handleGlobalKeyDown);
-    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, []);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [handleUpdateSettings]);
 
-  const handleUpdateSettings = (newSettings: Partial<TrackingSettings>) => {
-    setSettings(prev => {
-      const updated = { ...prev, ...newSettings };
-      trackerRef.current?.updateSettings(updated);
-      return updated;
-    });
-  };
-
-  // Mouse fallback pointer movement
   const handlePointerMove = (e: React.PointerEvent) => {
-    if (mouseSimMode && trackerRef.current) {
-      trackerRef.current.simulateGazeFromPointer(e.clientX, e.clientY);
-    }
+    if (mouseMode) trackerRef.current?.simulateGazeFromPointer(e.clientX, e.clientY);
   };
 
-  const handlePointerDown = () => {
-    if (mouseSimMode && trackerRef.current) {
-      soundEngine.playBlinkClick();
-    }
-  };
+  const activeDefinition = ACTIVITIES.find(a => a.id === activeTab)!;
+  const isBusy = trackerStatus !== 'running' && !mouseMode;
+
+  // Activities are laid out inside this box rather than the whole window, so a
+  // reduced working area shrinks every one of them at once instead of needing
+  // each to understand the concept.
+  const workingArea = viewingGeometry.getWorkingArea();
+  const workingInset =
+    workingArea.width < window.innerWidth
+      ? {
+          marginLeft: workingArea.left,
+          marginRight: workingArea.left,
+          marginBottom: workingArea.top * 2,
+        }
+      : undefined;
 
   return (
     <div
-      id="gazeflow-app-root"
       onPointerMove={handlePointerMove}
-      onPointerDown={handlePointerDown}
-      className="relative w-screen h-screen overflow-hidden bg-[#050505] flex flex-col font-['Plus_Jakarta_Sans',sans-serif] text-[#e0e0e0] select-none"
+      className="relative w-screen h-screen overflow-hidden flex flex-col bg-[var(--surface)] text-ink"
     >
-      {/* Top Main Navigation & Optics Status Bar */}
-      <header className="relative z-30 flex items-center justify-between px-6 py-3.5 border-b border-white/5 bg-[#080808]/80 backdrop-blur-md shrink-0">
-        {/* Brand & Technical Status */}
-        <div className="flex items-center gap-4">
-          <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full shadow-[0_0_10px_rgba(16,185,129,0.6)] animate-pulse" />
+      <header className="relative z-30 flex items-center justify-between gap-4 px-5 py-3 border-b border-soft bg-[var(--surface-raised)] shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            onClick={() => setNavOpen(v => !v)}
+            className="lg:hidden p-2 rounded-xl text-ink-soft hover:bg-[var(--surface-sunken)]"
+            aria-label="Show activities"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-xs font-bold tracking-[0.35em] uppercase text-white/90 font-mono-tech">
-                GazeFlow Optics v4.0
-              </h1>
-              <span className="text-[9px] uppercase font-mono font-semibold tracking-widest px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                Active
-              </span>
-            </div>
-            <p className="text-[10px] text-white/30 tracking-wider font-mono hidden md:block">
-              NEURAL GAZE VECTOR INTERFACE
+            <h1 className="text-base font-semibold text-ink leading-tight whitespace-nowrap">{APP_NAME}</h1>
+            {/* Decorative, and the first thing worth dropping when the activity
+                tabs need the room. */}
+            <p className="hidden 2xl:block text-xs text-ink-faint truncate max-w-[240px]">
+              {activeDefinition.purpose}
             </p>
           </div>
         </div>
 
-        {/* Activity Tab Switcher */}
-        <nav className="flex items-center gap-1 bg-[#0d0d0d] border border-white/10 p-1 rounded-xl shadow-inner">
-          <button
-            id="tab-single-line"
-            onClick={() => {
-              setActiveTab('single_line');
-              soundEngine.playChime(440, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'single_line'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <PenTool className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="tracking-wide">Single Line</span>
-          </button>
-
-          <button
-            id="tab-constellation"
-            onClick={() => {
-              setActiveTab('constellation');
-              soundEngine.playChime(520, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'constellation'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <Star className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="tracking-wide">Constellations</span>
-          </button>
-
-          <button
-            id="tab-maze"
-            onClick={() => {
-              setActiveTab('maze');
-              soundEngine.playChime(580, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'maze'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <Compass className="w-3.5 h-3.5 text-teal-400" />
-            <span className="tracking-wide">Gaze Maze</span>
-          </button>
-
-          <button
-            id="tab-target-pop"
-            onClick={() => {
-              setActiveTab('target_pop');
-              soundEngine.playChime(640, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'target_pop'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <Target className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="tracking-wide">Target Burst</span>
-          </button>
-
-          <button
-            id="tab-quick-type"
-            onClick={() => {
-              setActiveTab('quick_type');
-              soundEngine.playChime(700, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'quick_type'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <MessageSquare className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="tracking-wide">Communicator</span>
-          </button>
-
-          <button
-            id="tab-reading-analysis"
-            onClick={() => {
-              setActiveTab('reading_analysis');
-              soundEngine.playChime(750, 0.2);
-            }}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
-              activeTab === 'reading_analysis'
-                ? 'bg-white/10 text-white border border-white/20 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
-                : 'text-white/40 hover:text-white/80 hover:bg-white/5'
-            }`}
-          >
-            <BrainCircuit className="w-3.5 h-3.5 text-purple-400" />
-            <span className="tracking-wide">ReadAlyzer</span>
-          </button>
+        <nav
+          className={`${
+            navOpen ? 'flex' : 'hidden'
+          } lg:flex absolute lg:static top-full left-0 right-0 lg:top-auto flex-col lg:flex-row gap-1 p-2 lg:p-0 bg-[var(--surface-raised)] lg:bg-transparent border-b lg:border-0 border-soft lg:shrink-0`}
+        >
+          {ACTIVITIES.map(activity => {
+            const Icon = activity.icon;
+            const isActive = activeTab === activity.id;
+            return (
+              <button
+                key={activity.id}
+                onClick={() => {
+                  setActiveTab(activity.id);
+                  setNavOpen(false);
+                  soundEngine.playChime(480, 0.12);
+                }}
+                className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
+                  isActive
+                    ? 'bg-sage-100 text-sage-700'
+                    : 'text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)]'
+                }`}
+              >
+                <Icon className="w-4 h-4 shrink-0" />
+                <span>{activity.label}</span>
+                {activity.group === 'assess' && (
+                  <span className="hidden 2xl:inline text-[10px] px-1.5 py-0.5 rounded-full bg-sky-100 text-sky-700">
+                    measure
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </nav>
 
-        {/* Right Status Columns & Controls */}
-        <div className="flex items-center gap-4">
-          {/* Live Telemetry Bar */}
-          <StatsBar
-            gaze={gaze}
-            fps={fps}
-            onOpenCalibration={() => setIsCalibrationOpen(true)}
-          />
+        <div className="flex items-center gap-2 shrink-0">
+          <SessionBar onOpenCalibration={() => setIsCalibrationOpen(true)} />
 
-          {/* Mouse / Pointer Simulation Fallback Toggle */}
           <button
-            id="toggle-mouse-sim-btn"
-            onClick={() => {
-              setMouseSimMode(!mouseSimMode);
-              soundEngine.playChime(mouseSimMode ? 350 : 650, 0.2);
-            }}
-            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium border flex items-center gap-1.5 transition-colors cursor-pointer ${
-              mouseSimMode
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
-                : 'bg-[#0d0d0d] border-white/10 text-white/40 hover:text-white/80 hover:border-white/20'
-            }`}
-            title="Toggle pointer simulation mode"
+            onClick={() => setIsRecentreOpen(true)}
+            title="Re-centre after moving (C)"
+            className="px-3 py-2 rounded-xl text-sm font-medium text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)] transition-colors flex items-center gap-2 shrink-0"
           >
-            <MousePointer className="w-3.5 h-3.5" />
-            <span className="hidden xl:inline">{mouseSimMode ? 'Sim: ON' : 'Pointer Sim'}</span>
+            <Crosshair className="w-4 h-4" />
+            <span className="hidden 2xl:inline">Re-centre</span>
           </button>
 
-          {/* Quick Re-Zero Center Gate */}
           <button
-            id="header-rezero-center-btn"
-            onClick={() => setIsCenterGateOpen(true)}
-            className="px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-xs font-mono font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Re-Zero Center Gaze Offset (Hotkey: C)"
-          >
-            <Focus className="w-3.5 h-3.5" />
-            <span className="hidden lg:inline">RE-ZERO</span>
-            <kbd className="hidden sm:inline px-1 bg-black/40 rounded text-[9px] text-white/40 border border-white/10">C</kbd>
-          </button>
-
-          {/* 9-Point Calibration Action */}
-          <button
-            id="header-calibrate-btn"
             onClick={() => setIsCalibrationOpen(true)}
-            className="px-3.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 text-xs font-mono font-semibold tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Launch 9-Point Gaze Calibration"
+            className="px-4 py-2 rounded-xl bg-sage-500 hover:bg-sage-600 text-white text-sm font-medium transition-colors"
           >
-            <Zap className="w-3.5 h-3.5 text-yellow-400" />
-            <span>9-PT CALIB</span>
+            Set up
           </button>
 
-          {/* Settings Button */}
           <button
-            id="header-settings-btn"
             onClick={() => setIsSettingsOpen(true)}
-            className="p-2 rounded-lg bg-[#0d0d0d] border border-white/10 text-white/40 hover:text-white hover:border-white/20 transition-colors cursor-pointer"
-            title="Open Eye Tracking Settings"
+            className="p-2 rounded-xl text-ink-soft hover:text-ink hover:bg-[var(--surface-sunken)] transition-colors"
+            aria-label="Settings"
           >
-            <Settings className="w-4 h-4" />
+            <Settings className="w-5 h-5" />
           </button>
         </div>
       </header>
 
-      {/* Main Interactive Stage */}
-      <main className="relative flex-1 w-full h-full overflow-hidden bg-[#050505]">
-        {/* Four Calibration Precision Corners (Sophisticated Dark Aesthetic) */}
-        <div className="absolute top-4 left-4 w-5 h-5 border-l-2 border-t-2 border-white/20 pointer-events-none z-10" />
-        <div className="absolute top-4 right-4 w-5 h-5 border-r-2 border-t-2 border-white/20 pointer-events-none z-10" />
-        <div className="absolute bottom-4 left-4 w-5 h-5 border-l-2 border-b-2 border-white/20 pointer-events-none z-10" />
-        <div className="absolute bottom-4 right-4 w-5 h-5 border-r-2 border-b-2 border-white/20 pointer-events-none z-10" />
+      <main className="relative flex-1 overflow-hidden" style={workingInset}>
+        {activeTab === 'single_line' && (
+          <GazePaint settings={settings} onUpdateSettings={handleUpdateSettings} />
+        )}
+        {activeTab === 'constellation' && <ConstellationTask />}
+        {activeTab === 'maze' && <GazeMazeTask />}
+        {activeTab === 'target_pop' && <TargetPopTask dwellDurationMs={settings.dwellDurationMs} />}
+        {activeTab === 'quick_type' && <GazeTypingTask dwellDurationMs={settings.dwellDurationMs} />}
+        {activeTab === 'reading_analysis' && <ReadingAssessment />}
 
-        {/* Loading / Error Banner */}
-        {trackerStatus !== 'running' && (
-          <div className="absolute inset-0 z-40 bg-[#050505]/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-center">
-            <div className="max-w-md w-full bg-[#080808] border border-white/10 rounded-2xl p-8 shadow-2xl space-y-6">
-              <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
-                <Camera className="w-7 h-7 animate-pulse" />
-              </div>
-
+        {isBusy && (
+          <div className="absolute inset-0 z-40 bg-[var(--surface)]/95 backdrop-blur-sm flex items-center justify-center px-6">
+            <div className="surface rounded-3xl p-8 max-w-md w-full text-center space-y-5">
+              <span className="w-14 h-14 rounded-2xl bg-sage-100 text-sage-600 flex items-center justify-center mx-auto">
+                <Camera className="w-6 h-6" />
+              </span>
               <div>
-                <span className="inline-block px-3 py-1 bg-emerald-500/10 text-emerald-400 text-[10px] font-bold tracking-widest uppercase rounded-full mb-3 font-mono">
-                  Optical Sensor Feed
-                </span>
-                <h3 className="text-xl font-light text-white font-serif-chic italic">
-                  {trackerStatus === 'loading_model' && 'Initializing Vision Matrix...'}
-                  {trackerStatus === 'requesting_camera' && 'Connecting to Optical Sensor...'}
-                  {trackerStatus === 'error' && 'Optical Stream Interrupted'}
-                  {trackerStatus === 'uninitialized' && 'Preparing Neural Eye Tracker...'}
-                </h3>
-                <p className="mt-2 text-xs text-white/50 leading-relaxed font-mono">
-                  {trackerStatus === 'loading_model' && 'Downloading 478-point 3D iris neural network model.'}
-                  {trackerStatus === 'requesting_camera' && 'Please grant webcam permission to activate real-time gaze telemetry.'}
-                  {trackerStatus === 'error' && (trackerError || 'Sensor initialization timed out. Pointer simulation is available.')}
+                <h2 className="text-lg font-semibold text-ink">
+                  {trackerStatus === 'loading_model' && 'Getting the eye tracker ready'}
+                  {trackerStatus === 'requesting_camera' && 'Waiting for the camera'}
+                  {trackerStatus === 'error' && 'The camera didn’t start'}
+                  {trackerStatus === 'uninitialized' && 'Starting up'}
+                </h2>
+                <p className="text-sm text-ink-soft mt-2 leading-relaxed">
+                  {trackerStatus === 'loading_model' && 'Downloading the face model. This happens once.'}
+                  {trackerStatus === 'requesting_camera' && 'Please allow camera access when your browser asks.'}
+                  {trackerStatus === 'error' && (trackerError || 'Something went wrong starting the camera.')}
+                  {trackerStatus === 'uninitialized' && 'One moment.'}
                 </p>
               </div>
+              {trackerStatus === 'error' && (
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => trackerRef.current?.initialize()}
+                    className="flex-1 py-3 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium flex items-center justify-center gap-2 transition-colors"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    Try again
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMouseMode(true);
+                      trackerRef.current?.setSimulatedPointer(true);
+                    }}
+                    className="flex-1 py-3 rounded-xl border border-strong text-ink font-medium flex items-center justify-center gap-2 transition-colors hover:bg-[var(--surface-sunken)]"
+                  >
+                    <MousePointer className="w-4 h-4" />
+                    Use the mouse
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
-              <div className="flex gap-3">
+        {showWelcome && !isBusy && (
+          <div className="absolute inset-0 z-40 bg-[var(--surface)]/95 backdrop-blur-sm flex items-center justify-center px-6">
+            <div className="surface rounded-3xl p-8 max-w-lg w-full space-y-5">
+              <h2 className="text-2xl font-semibold text-ink">Welcome to {APP_NAME}</h2>
+              <p className="text-sm text-ink-soft leading-relaxed">
+                Before anything else, the tracker needs to learn how your eyes map onto this screen.
+                It takes under a minute, and afterwards you get an accuracy figure so you know exactly
+                how much to trust what follows.
+              </p>
+              <p className="text-sm text-ink-soft leading-relaxed">
+                You can skip it and explore — the games will work roughly — but nothing you measure
+                will mean much until set-up is done.
+              </p>
+              <div className="flex flex-wrap gap-3">
                 <button
-                  id="retry-camera-init-btn"
-                  onClick={() => trackerRef.current?.initialize()}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-semibold text-xs shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2 cursor-pointer transition-all font-mono"
+                  onClick={() => {
+                    setShowWelcome(false);
+                    setIsCalibrationOpen(true);
+                  }}
+                  className="px-5 py-3 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium transition-colors"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Retry Camera</span>
+                  Start set-up
                 </button>
                 <button
-                  id="enable-pointer-sim-fallback-btn"
-                  onClick={() => {
-                    setMouseSimMode(true);
-                    setTrackerStatus('running');
-                  }}
-                  className="flex-1 py-2.5 px-4 rounded-xl border border-white/15 bg-white/5 hover:bg-white/10 text-white/80 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors font-mono"
+                  onClick={() => setShowWelcome(false)}
+                  className="px-5 py-3 rounded-xl border border-strong text-ink font-medium hover:bg-[var(--surface-sunken)] transition-colors"
                 >
-                  <MousePointer className="w-3.5 h-3.5" />
-                  <span>Use Pointer Sim</span>
+                  Look around first
                 </button>
               </div>
             </div>
           </div>
         )}
-
-        {/* Selected Activity Views */}
-        {activeTab === 'single_line' && (
-          <DrawingCanvas
-            gaze={gaze}
-            settings={settings}
-            onUpdateSettings={handleUpdateSettings}
-            onOpenCalibration={() => setIsCalibrationOpen(true)}
-          />
-        )}
-
-        {activeTab === 'constellation' && (
-          <ConstellationTask gaze={gaze} />
-        )}
-
-        {activeTab === 'maze' && (
-          <GazeMazeTask gaze={gaze} />
-        )}
-
-        {activeTab === 'target_pop' && (
-          <TargetPopTask gaze={gaze} />
-        )}
-
-        {activeTab === 'quick_type' && (
-          <GazeTypingTask gaze={gaze} />
-        )}
-
-        {activeTab === 'reading_analysis' && (
-          <ReadingAnalysisTask gaze={gaze} />
-        )}
       </main>
 
-      {/* Floating Gaze Reticle & Trail Particles */}
       {settings.showGazeReticle && (
-        <GazeCursor
-          gaze={gaze}
+        <GazePointer
           color={settings.strokeColor}
-          glowColor={settings.strokeGlowColor}
           showTrail={settings.showGazeTrail}
+          subdued={activeTab === 'reading_analysis'}
         />
       )}
 
-      {/* Picture-In-Picture Camera Feed */}
-      {settings.showWebcamPiP && (
-        <CameraFeed
+      {settings.showWebcamPiP && videoElement && (
+        <CameraPreview
           videoElement={videoElement}
-          landmarks={landmarks}
-          gaze={gaze}
-          showMeshOverlay={showMeshOverlay}
-          onToggleMesh={() => setShowMeshOverlay(!showMeshOverlay)}
+          landmarksRef={landmarksRef}
+          showMesh={showMesh}
+          onToggleMesh={() => setShowMesh(v => !v)}
         />
       )}
 
-      {/* Center Calibration & Activation Gate */}
-      <CenterCalibrationGate
-        isOpen={isCenterGateOpen && (trackerStatus === 'running' || mouseSimMode)}
-        gaze={gaze}
-        onActivated={() => setIsCenterGateOpen(false)}
-        onOpenFullCalibration={() => {
-          setIsCenterGateOpen(false);
-          setIsCalibrationOpen(true);
+      {settings.showPostureGuide && !isCalibrationOpen && !isRecentreOpen && (
+        <HeadAlignmentGuide onRecentre={() => setIsRecentreOpen(true)} />
+      )}
+
+      <CalibrationFlow
+        isOpen={isCalibrationOpen}
+        tracker={trackerRef.current}
+        settings={settings}
+        onClose={() => setIsCalibrationOpen(false)}
+        onFinished={() => setShowWelcome(false)}
+      />
+
+      <RecentreOverlay
+        isOpen={isRecentreOpen}
+        tracker={trackerRef.current}
+        sensitivityX={settings.sensitivityX}
+        sensitivityY={settings.sensitivityY}
+        onClose={result => {
+          setIsRecentreOpen(false);
+          if (result) {
+            showToast(
+              result.moved < 8
+                ? 'Already well centred — nothing much to correct.'
+                : `Re-centred by ${Math.round(result.moved)} px.`
+            );
+          } else {
+            showToast('Couldn’t re-centre from that. Run set-up again if it still feels off.');
+          }
         }}
       />
 
-      {/* 9-Point & Freeform Manual Click Calibration Modal */}
-      <CalibrationModal
-        isOpen={isCalibrationOpen}
-        gaze={gaze}
-        settings={settings}
-        onUpdateSettings={handleUpdateSettings}
-        onClose={() => setIsCalibrationOpen(false)}
-        onCompleted={() => setIsCalibrationOpen(false)}
-      />
-
-      {/* Settings Modal */}
-      <SettingsModal
+      <SettingsPanel
         isOpen={isSettingsOpen}
         settings={settings}
+        theme={theme}
+        onThemeChange={setTheme}
         onClose={() => setIsSettingsOpen(false)}
         onUpdateSettings={handleUpdateSettings}
-        onRecalibrate={() => setIsCalibrationOpen(true)}
+        onRecalibrate={() => {
+          setIsSettingsOpen(false);
+          setIsCalibrationOpen(true);
+        }}
+        onOpenDiagnostics={() => {
+          setIsSettingsOpen(false);
+          setIsDiagnosticsOpen(true);
+        }}
       />
 
-      {/* Sophisticated Dark Bottom Technical Telemetry Footer */}
-      <footer className="px-6 py-2 flex justify-between items-center text-[10px] text-white/25 tracking-widest uppercase font-mono font-medium border-t border-white/5 bg-[#050505] shrink-0 z-20">
-        <span>© 2024 Neural Optics Interface</span>
-        <div className="flex gap-6">
-          <span className="text-white/40">SENSOR: {trackerStatus === 'running' ? 'Webcam 1080p Optical Feed' : 'Offline'}</span>
-          <span>CALIBRATION: {calibrationEngine.isCalibrated() ? 'Dual-Axis Matrix Active' : 'Default Matrix'}</span>
+      <DiagnosticsPanel
+        isOpen={isDiagnosticsOpen}
+        tracker={trackerRef.current}
+        onClose={() => setIsDiagnosticsOpen(false)}
+      />
+
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 surface rounded-full px-5 py-2.5 text-sm text-ink">
+          {toast}
         </div>
-      </footer>
+      )}
     </div>
   );
 }
