@@ -10,6 +10,7 @@
     "clean": "rm -rf dist server.js",
     "typecheck": "tsc --noEmit",
     "check:calibration": "bun run scripts/calibrationCheck.ts",
+    "check:reading": "bun run scripts/readingCheck.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

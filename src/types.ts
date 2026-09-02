@@ -72,6 +72,14 @@ export interface GazeState {
   confidence: number;
   /** True while the estimate is being held through a blink rather than measured. */
   isHeld: boolean;
+  /** How long the current run of held frames has lasted, in ms. */
+  heldForMs: number;
+  /**
+   * True only once a hold has outlasted an ordinary blink. Anything shown to
+   * the user should key off this rather than isHeld, so a reflex the client
+   * cannot control is not reported back to them as a fault.
+   */
+  isVisiblyInterrupted: boolean;
   headPose: HeadPose;
   timestamp: number;
 }
@@ -239,6 +247,8 @@ export interface TrackingSettings {
   minConfidence: number;
   penMode: PenActivationMode;
   audioEnabled: boolean;
+  /** Read calibration instructions aloud, for eyes that are busy on a target. */
+  spokenPrompts: boolean;
   showWebcamPiP: boolean;
   showLandmarkMesh: boolean;
   showGazeTrail: boolean;

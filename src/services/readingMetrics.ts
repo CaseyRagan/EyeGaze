@@ -86,8 +86,18 @@ export interface ReadingAnalysis {
 
 /** Minimum time on a spot before it counts as a fixation. */
 const MIN_FIXATION_MS = 80;
-/** Gaps shorter than this (a blink, a dropped frame) do not split a fixation. */
-const MERGE_GAP_MS = 75;
+/**
+ * Gaps shorter than this (a blink, a dropped frame) do not split a fixation.
+ *
+ * Sized for a blink rather than a dropped frame. A spontaneous blink closes the
+ * lids for 100-150 ms and people blink around fifteen times a minute, so at the
+ * old 75 ms threshold a normal reader's blinks each cut one fixation in two and
+ * inflated the fixations-per-hundred-words count by several percent — a
+ * measurement error that pushed every grade equivalent the wrong way. The
+ * distance test below still applies, so two fixations genuinely separated by a
+ * saccade are never merged however close together in time they fall.
+ */
+const MERGE_GAP_MS = 250;
 /** Two fixation clusters within this angle are treated as one fixation. */
 const MERGE_DISTANCE_DEG = 1.0;
 /** A fixation must land within this distance of a line to be counted as on-text. */
@@ -268,12 +278,16 @@ export function analyseReading(params: {
   }
   const headMovementDegPerSec = durationSec > 0 ? (totalRotationRad * (180 / Math.PI)) / durationSec : 0;
 
+  // With nothing on the text there is nothing to grade. Each individual
+  // measure would otherwise be handed a zero and asked what it meant.
+  const measured = onTextFixations > 0;
+
   const gradeEquivalents = {
-    fixations: gradeEquivalentFor('fixationsPer100Words', fixationsPer100Words),
-    regressions: gradeEquivalentFor('regressionsPer100Words', regressionsPer100Words),
-    span: gradeEquivalentFor('spanOfRecognition', spanOfRecognition),
-    duration: gradeEquivalentFor('averageFixationDuration', averageFixationDurationSec),
-    rate: gradeEquivalentFor('readingRate', readingRateWithComprehensionWpm),
+    fixations: measured ? gradeEquivalentFor('fixationsPer100Words', fixationsPer100Words) : null,
+    regressions: measured ? gradeEquivalentFor('regressionsPer100Words', regressionsPer100Words) : null,
+    span: measured ? gradeEquivalentFor('spanOfRecognition', spanOfRecognition) : null,
+    duration: measured ? gradeEquivalentFor('averageFixationDuration', averageFixationDurationSec) : null,
+    rate: measured ? gradeEquivalentFor('readingRate', readingRateWithComprehensionWpm) : null,
     overall: null as number | null,
   };
 

@@ -317,6 +317,45 @@ centre than at the edges, so shrinking the area does not merely make targets
 smaller: it moves all of them into the part of the range the tracker handles
 well. A 70% working area takes a 32 degree half-angle down to 24.
 
+## Blinks
+
+People blink about fifteen times a minute and cannot help it. Everything about
+how the app handles that follows from one observation from a real session: when
+the display reacted to every blink, the client stopped blinking, and within a
+minute had dry eyes and was tracking worse. The interface was creating the
+instability it was reporting.
+
+So a blink is ridden out in silence. Concretely:
+
+- The pointer, the trail and the drawing stroke do not change for an
+  interruption shorter than 450 ms. `isVisiblyInterrupted` exists for anything
+  shown to the user; `isHeld` is for anything that needs to know the estimate is
+  not currently measured. Nothing user-facing should key off `isHeld`.
+- The estimate is held from the *first* sign of the lids closing, at an openness
+  well above the threshold that counts a blink. A lid on its way down covers the
+  top of the iris before the eye reads as closed, dragging the iris centre with
+  it, so waiting for a declared blink meant the pointer had already lurched.
+- The smoothing filter keeps running during a hold, fed the held position.
+  Bypassing it left its notion of time stale, so the first real sample after a
+  blink arrived with a large gap, took a near-unity weight, and snapped.
+- A dwell in progress survives a blink rather than resetting.
+
+Blinks also corrupted two measurements until this was noticed:
+
+- **Steadiness.** Precision is the scatter between consecutive samples, and a
+  pair straddling a blink measures the eye's real travel across the gap rather
+  than any wobble. One blink during a check could turn a genuine 0.1 degrees
+  into several. Pairs more than one frame interval apart are now skipped.
+- **Fixation counts.** The reading analysis merged fixations across gaps shorter
+  than 75 ms, which is shorter than a blink, so every blink split one fixation
+  into two and inflated fixations per hundred words — pushing every grade
+  equivalent the wrong way. The threshold is now 250 ms, sized for a blink; the
+  distance test still prevents merging across a genuine saccade.
+
+"Eyes found" excludes blink frames from its denominator. It is meant to say how
+reliably the tracker held on to open eyes, and counting a reflex against that
+both misdescribes the measurement and, shown to a client, discourages blinking.
+
 ## Things that were tried and did not help
 
 Recorded so nobody spends the afternoon re-deriving them.

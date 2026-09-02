@@ -23,6 +23,7 @@ a CDN on first run, so the first load needs a network connection.
 ```bash
 bun run typecheck          # tsc --noEmit
 bun run check:calibration  # synthetic regression test of the gaze mapping
+bun run check:reading      # reading measures against hand-built gaze streams
 ```
 
 ## Accuracy
@@ -56,6 +57,12 @@ whether camera angle matters. Short version:
 The head-position guide stays on screen during a session so anyone who shifts,
 or looks away and back, can line up again without redoing set-up. Press **H** to
 toggle it, **C** to re-centre after a big move, **K** to run set-up again.
+
+The app opens on a home screen with the camera off, and releases the camera
+again whenever you return to it — clicking the name in the corner is the way
+back. A therapy tool spends much of its life open but unused, and a camera light
+burning at someone who is not using it is uncomfortable in a way no reassurance
+really fixes.
 
 The check step after calibration measures error at five points the model was
 never fitted on, so the figure it reports cannot flatter itself. Everything the

@@ -5,6 +5,7 @@ import { calibrationEngine } from '../services/calibration';
 import { viewingGeometry } from '../services/viewingGeometry';
 import { DistanceCheck } from './DistanceCheck';
 import { soundEngine } from '../services/audio';
+import { setSpeechEnabled } from '../services/speech';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -278,6 +279,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               onChange={v => {
                 onUpdateSettings({ audioEnabled: v });
                 soundEngine.setEnabled(v);
+              }}
+            />
+            <Toggle
+              label="Read instructions aloud"
+              detail="During set-up only. Your eyes are on a target when the instructions matter, so hearing them works better than reading them."
+              checked={settings.spokenPrompts}
+              onChange={v => {
+                onUpdateSettings({ spokenPrompts: v });
+                setSpeechEnabled(v);
               }}
             />
           </Section>

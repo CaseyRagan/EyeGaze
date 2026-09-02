@@ -124,9 +124,11 @@ export function useGazeDwell({
       }
 
       if (nearest) {
-        // Blinks and held estimates must not start a dwell — that is how a
-        // client ends up "selecting" something they never looked at.
-        if (!gaze.isHeld) {
+        // A stalled estimate must not start a dwell — that is how a client ends
+        // up "selecting" something they never looked at. A blink is not a
+        // stall: an in-progress dwell rides through it, and starting one is
+        // fine because the held position is still where they were looking.
+        if (!gaze.isVisiblyInterrupted) {
           activeRef.current = { id: nearest.id, startedAt: now, firstDistance: nearestDistance };
         }
         publish(nearest.id, 0, nearestDistance);

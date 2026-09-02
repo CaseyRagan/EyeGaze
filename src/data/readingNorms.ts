@@ -71,10 +71,15 @@ export function gradeEquivalentFor(metric: NormMetric, value: number): number | 
 
   const descending = LOWER_IS_BETTER.includes(metric);
 
-  // Zero is a real result for the measures where less is better — a reader who
-  // never went back has no regressions, which is the top of the scale, not a
-  // missing value. For the others it means nothing was measured.
-  if (value === 0) return descending ? TAYLOR_NORMS[TAYLOR_NORMS.length - 1].grade : null;
+  // Zero is a real result for regressions and only for regressions: a reader
+  // who never looked back has none, which is the top of the scale rather than a
+  // missing value. Zero of anything else means nothing was measured — you
+  // cannot read a passage in no fixations of no duration — and treating those
+  // as "top of the scale" had the report announcing an adult reading level for
+  // a recording in which the eyes never landed on the text at all.
+  if (value === 0) {
+    return metric === 'regressionsPer100Words' ? TAYLOR_NORMS[TAYLOR_NORMS.length - 1].grade : null;
+  }
   const series = TAYLOR_NORMS.map(n => ({ grade: n.grade, value: n[metric] }));
 
   // Below the least mature norm.
