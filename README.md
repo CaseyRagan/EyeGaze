@@ -44,6 +44,14 @@ whether camera angle matters. Short version:
 - Check the viewing distance in settings once. Accuracy in degrees is computed
   from it, so an estimate that is out by a factor of two reports twice the error
   you actually have.
+- **Do not sit close to the screen.** What matters is how far off centre the
+  window edges sit: past about 22° the iris starts hiding behind the eyelid and
+  accuracy collapses, while precision stays deceptively good. Set-up computes
+  this and tells you how far back to sit. On a small laptop that is usually
+  45–55 cm.
+- On a Mac, turn off Centre Stage, Portrait and Studio Light. Centre Stage
+  re-frames the picture as you move, which pulls the calibration apart
+  underneath you.
 
 The head-position guide stays on screen during a session so anyone who shifts,
 or looks away and back, can line up again without redoing set-up. Press **H** to

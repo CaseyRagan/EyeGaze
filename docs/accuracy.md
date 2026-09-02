@@ -61,6 +61,43 @@ binocular fusion weights each eye by how square-on it is to the camera, so the
 estimate degrades gracefully rather than jumping, but accuracy still falls off
 past roughly 20°.
 
+### 3b. Sitting too close — the one that looks like a software fault
+
+This deserves its own entry because it is invisible from either number that
+causes it, and because its symptom points the wrong way.
+
+What matters is not the viewing distance and not the screen size, but the angle
+they produce together: how far off centre the edges of the window sit. At 27 cm
+from a laptop, that is over 30 degrees. Webcam iris tracking degrades badly well
+before then — past roughly 22 degrees the iris slides behind the eyelid and the
+inner corner, so less of it is visible to estimate a centre from; its outline
+turns increasingly elliptical; and people stop rotating their eyes that far and
+start turning their heads instead, which breaks the assumption the calibration
+rests on.
+
+The symptom is the confusing part. Precision stays *good* — the estimate is
+steady, confidence is high, the eyes are found in 95% of frames — while accuracy
+is terrible and worst at the edges. A steady estimate that lands in the wrong
+place looks exactly like a broken mapping, so it sends you into the software.
+
+Real numbers from a session that prompted this: 9-20 degrees of error, steadiness
+of 0.5-0.85 degrees, 95% of frames tracked, at a measured 27 cm. The tracker was
+working; it was being asked for something no webcam can deliver.
+
+`GazeRangeCheck` computes the half-angle and says how far back to sit. Below
+about 22 degrees is comfortable. The alternatives, when moving back is not an
+option, are a smaller browser window or a reduced working area.
+
+### 3c. Camera processing that re-frames the picture
+
+On a Mac, Centre Stage crops and pans the camera image to keep the subject
+framed. That is precisely the opposite of what eye tracking needs: it changes
+the apparent head position and size continuously, and independently of what the
+head is actually doing, which corrupts the head-position features and the
+distance estimate at the same time. Portrait mode and Studio Light alter the
+image in less catastrophic but still unhelpful ways. All three are off by
+default but easy to enable by accident from Control Centre.
+
 ### 4. Landmark noise
 
 The iris centre estimate wobbles by a fraction of a pixel frame to frame, and
@@ -241,6 +278,18 @@ Leave-one-out error identifies such a point cleanly, and `pruneOutlierAnchors`
 drops at most two of them. On synthetic data with one point captured while the
 client looked at the opposite corner, this takes the result from 2.06 to 0.85
 degrees; on a clean grid it removes nothing.
+
+## The working area
+
+For someone who cannot sit further back — or a client whose eyes genuinely
+cannot make large excursions, which is common in exactly the populations this
+tool is built for — the working area setting confines calibration and every
+activity to a centred fraction of the window.
+
+This is a better trade than it first appears. Accuracy is much better near the
+centre than at the edges, so shrinking the area does not merely make targets
+smaller: it moves all of them into the part of the range the tracker handles
+well. A 70% working area takes a 32 degree half-angle down to 24.
 
 ## Things that were tried and did not help
 

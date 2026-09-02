@@ -31,6 +31,15 @@ export interface ViewingGeometrySettings {
    * which relative changes track correctly and the absolute value is real.
    */
   distanceScale: number;
+  /**
+   * Fraction of the window used for targets and activities, 0.5 to 1.
+   *
+   * Shrinking the working area is the answer for someone who cannot sit further
+   * back, and for a client whose eyes genuinely cannot make large excursions —
+   * a restricted motility, a palsy, or simply fatigue late in a session.
+   * Everything stays reachable; it just occupies less of the glass.
+   */
+  workingAreaScale: number;
 }
 
 const DEFAULTS: ViewingGeometrySettings = {
@@ -40,6 +49,7 @@ const DEFAULTS: ViewingGeometrySettings = {
   assumedDistanceCm: 55,
   useMeasuredDistance: true,
   distanceScale: 1,
+  workingAreaScale: 1,
 };
 
 /** Below this agreement between the two estimates, the measurement is not used. */
@@ -139,6 +149,45 @@ class ViewingGeometry {
     const distanceMm = this.getEffectiveDistanceCm() * 10;
     if (distanceMm <= 0) return 0;
     return (2 * Math.atan(mm / (2 * distanceMm)) * 180) / Math.PI;
+  }
+
+  /** The working area's size and offset within the window, in pixels. */
+  public getWorkingArea(): { left: number; top: number; width: number; height: number } {
+    const scale = Math.max(0.5, Math.min(1, this.settings.workingAreaScale));
+    const width = window.innerWidth * scale;
+    const height = window.innerHeight * scale;
+    return {
+      left: (window.innerWidth - width) / 2,
+      top: (window.innerHeight - height) / 2,
+      width,
+      height,
+    };
+  }
+
+  /**
+   * Half the angle the working area subtends at the eye, horizontally.
+   *
+   * This is the single most useful number for predicting whether tracking will
+   * work, and it is not obvious from either the distance or the screen size
+   * alone. Sitting close to a large window means the eyes have to rotate a long
+   * way to reach the edges, and webcam iris tracking falls apart well before
+   * the eye runs out of travel: past roughly 20 degrees the iris is partly
+   * hidden behind the eyelids and the inner corner, its visible outline turns
+   * elliptical, and the landmark estimate that everything else is built on
+   * stops being reliable. People also stop rotating their eyes that far and
+   * start turning their heads instead, which breaks a different assumption.
+   */
+  public getViewportHalfAngleDeg(): number {
+    const halfWidthMm = (this.getWorkingArea().width * this.getMillimetresPerPixel()) / 2;
+    const distanceMm = this.getEffectiveDistanceCm() * 10;
+    if (distanceMm <= 0) return 0;
+    return (Math.atan(halfWidthMm / distanceMm) * 180) / Math.PI;
+  }
+
+  /** How far back you would have to sit to keep within `maxHalfAngleDeg`. */
+  public getDistanceForHalfAngleCm(maxHalfAngleDeg: number): number {
+    const halfWidthMm = (this.getWorkingArea().width * this.getMillimetresPerPixel()) / 2;
+    return halfWidthMm / Math.tan((maxHalfAngleDeg * Math.PI) / 180) / 10;
   }
 
   public degreesToPixels(degrees: number): number {

@@ -102,6 +102,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
 
             {geometry.useMeasuredDistance && <DistanceCheck onChanged={() => setGeometry(viewingGeometry.getSettings())} />}
 
+            <Field
+              label="Working area"
+              value={geometry.workingAreaScale >= 0.99 ? 'Whole window' : `${Math.round(geometry.workingAreaScale * 100)}%`}
+            >
+              <input
+                type="range"
+                min={0.5}
+                max={1}
+                step={0.05}
+                value={geometry.workingAreaScale}
+                onChange={e => updateGeometry({ workingAreaScale: Number(e.target.value) })}
+                className="w-full"
+              />
+              <p className="text-xs text-ink-soft mt-1 leading-relaxed">
+                Shrinks everything into the middle of the screen. Worth using when you cannot sit
+                further back, or when large eye movements are difficult — accuracy is much better
+                near the centre than at the edges. Re-run set-up after changing it.
+              </p>
+            </Field>
+
             {!geometry.useMeasuredDistance && (
               <Field label="Viewing distance" value={`${geometry.assumedDistanceCm} cm`}>
                 <input

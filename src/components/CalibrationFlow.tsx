@@ -21,6 +21,7 @@ import { soundEngine } from '../services/audio';
 import { viewingGeometry } from '../services/viewingGeometry';
 import { PostureGuide } from './PostureGuide';
 import { DistanceCheck } from './DistanceCheck';
+import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
 
 type Stage = 'position' | 'capture' | 'head_pass' | 'validate' | 'result';
@@ -35,17 +36,57 @@ interface CalibrationFlowProps {
   onFinished: () => void;
 }
 
-/** Time for the eye to land on a newly shown dot before we believe anything. */
-const SETTLE_MS = 650;
-/** Time spent collecting samples once the eye has landed. */
-const COLLECT_MS = 900;
-/** Validation dwells are longer, because precision needs more samples. */
-const VALIDATE_COLLECT_MS = 1100;
+/**
+ * Capture is gated on the eye actually settling, not on a stopwatch.
+ *
+ * The old behaviour filled each ring on a timer whether or not anyone was
+ * looking at it, so a point was recorded from whatever the eye happened to be
+ * doing — mid-saccade, glancing at the therapist, halfway to the next dot. That
+ * is not a subtle loss: a least-squares fit spreads one bad point across the
+ * whole surface.
+ *
+ * The obvious fix, only accepting samples that land near the target, is not
+ * available: before calibration there is no mapping, so there is no way to know
+ * where someone is looking. But there is no need to know *where* — only that
+ * the eye has stopped moving. Fixation is measurable without any mapping at
+ * all, and a settled eye during a target's presentation is overwhelmingly
+ * likely to be settled on that target.
+ *
+ * So the ring advances only while the eye is still, and visibly pauses when it
+ * is not. The timeouts exist because a client who cannot hold a steady fixation
+ * must still be able to finish.
+ */
+/** Minimum time on a dot before collection can begin, however quickly it settles. */
+const MIN_SETTLE_MS = 350;
+/** Give up waiting for a fixation and collect anyway after this long. */
+const SETTLE_TIMEOUT_MS = 3000;
+/** Settled samples wanted per calibration point. */
+const TARGET_SETTLED_SAMPLES = 20;
+/** Validation needs more, because precision is measured from their scatter. */
+const TARGET_SETTLED_SAMPLES_VALIDATE = 28;
+/** Stop collecting regardless once the window has been open this long. */
+const COLLECT_TIMEOUT_MS = 3200;
 /** Below this many settled samples, fall back to using everything collected. */
 const MIN_SETTLED_SAMPLES = 8;
 /** Length of the head-movement pass. Long enough to cover a full sweep twice. */
 const HEAD_PASS_SETTLE_MS = 900;
 const HEAD_PASS_COLLECT_MS = 6000;
+
+/**
+ * Where a target actually lands, as a fraction of the viewport.
+ *
+ * Specs are percentages of the *working area*, which may be smaller than the
+ * window. Anchors are still stored in viewport fractions, so the mapping the
+ * model learns remains in viewport coordinates and everything downstream is
+ * unaffected — the calibrated region is simply smaller than the glass.
+ */
+function targetViewportNorm(spec: CalibrationPointSpec): { xNorm: number; yNorm: number } {
+  const area = viewingGeometry.getWorkingArea();
+  return {
+    xNorm: (area.left + (spec.xPercent / 100) * area.width) / window.innerWidth,
+    yNorm: (area.top + (spec.yPercent / 100) * area.height) / window.innerHeight,
+  };
+}
 
 const DEPTH_TARGETS: Record<CalibrationDepth, CalibrationPointSpec[]> = {
   quick: QUICK_CALIBRATION_TARGETS,
@@ -101,6 +142,8 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
    * means a client whose gaze never quite settles still calibrates.
    */
   const settledSamplesRef = useRef<CalibrationSample[]>([]);
+  /** Mapped positions for the settled samples, used by the accuracy check. */
+  const settledPointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const gazePointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const framesSeenRef = useRef(0);
   const framesUsedRef = useRef(0);
@@ -126,6 +169,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     setProgress(0);
     samplesRef.current = [];
     settledSamplesRef.current = [];
+    settledPointsRef.current = [];
     gazePointsRef.current = [];
     phaseStartRef.current = performance.now();
     soundEngine.playChime(560, 0.1);
@@ -144,10 +188,11 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       const settled = settledSamplesRef.current;
       const chosen = settled.length >= MIN_SETTLED_SAMPLES ? settled : samplesRef.current;
 
+      const { xNorm, yNorm } = targetViewportNorm(spec);
       const anchor = calibrationEngine.addAnchorFromSamples(
         `grid-${spec.id}`,
-        spec.xPercent / 100,
-        spec.yPercent / 100,
+        xNorm,
+        yNorm,
         chosen,
         spec.label
       );
@@ -163,17 +208,23 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   );
 
   const finishValidatePoint = useCallback((spec: CalibrationPointSpec) => {
-    const points = gazePointsRef.current;
+    // Measure accuracy from settled samples only. Including the approach to the
+    // dot would report the journey rather than the destination.
+    const points =
+      settledPointsRef.current.length >= MIN_SETTLED_SAMPLES
+        ? settledPointsRef.current
+        : gazePointsRef.current;
     const scrW = window.innerWidth;
     const scrH = window.innerHeight;
-    const targetX = (spec.xPercent / 100) * scrW;
-    const targetY = (spec.yPercent / 100) * scrH;
+    const { xNorm, yNorm } = targetViewportNorm(spec);
+    const targetX = xNorm * scrW;
+    const targetY = yNorm * scrH;
 
     if (points.length < 5) {
       validationResultsRef.current.push({
         id: String(spec.id),
-        xNorm: spec.xPercent / 100,
-        yNorm: spec.yPercent / 100,
+        xNorm,
+        yNorm,
         errorPx: NaN,
         errorDeg: NaN,
         offsetX: 0,
@@ -203,8 +254,8 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
     validationResultsRef.current.push({
       id: String(spec.id),
-      xNorm: spec.xPercent / 100,
-      yNorm: spec.yPercent / 100,
+      xNorm,
+      yNorm,
       errorPx,
       errorDeg: viewingGeometry.pixelsToDegrees(errorPx),
       offsetX: meanX - targetX,
@@ -259,7 +310,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       if (!usable) return;
       framesUsedRef.current++;
       samplesRef.current.push(sample);
-      if (gaze.isFixating) settledSamplesRef.current.push(sample);
+      if (gaze.isFixating) {
+        settledSamplesRef.current.push(sample);
+        settledPointsRef.current.push({ x: gaze.screenX, y: gaze.screenY });
+      }
       gazePointsRef.current.push({ x: gaze.screenX, y: gaze.screenY });
     });
 
@@ -299,45 +353,67 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   useEffect(() => {
     if (!isOpen || (stage !== 'capture' && stage !== 'validate') || !currentTarget) return;
 
-    const collectDuration = stage === 'validate' ? VALIDATE_COLLECT_MS : COLLECT_MS;
+    const wanted = stage === 'validate' ? TARGET_SETTLED_SAMPLES_VALIDATE : TARGET_SETTLED_SAMPLES;
+
+    const advance = () => {
+      if (stage === 'capture') finishCapturePoint(currentTarget);
+      else finishValidatePoint(currentTarget);
+
+      const next = targetIndex + 1;
+      if (next < targets.length) {
+        beginPoint(next);
+        return;
+      }
+
+      if (stage === 'capture') {
+        // Drop any point the rest of the grid clearly disagrees with, before it
+        // can distort the head-movement fit and the accuracy check after it.
+        setPrunedPoints(calibrationEngine.pruneOutlierAnchors().removed);
+
+        // The posture held during calibration is what the mapping is tied to,
+        // so it becomes the reference for later drift warnings.
+        const posture = liveGazeRef.current?.headPose;
+        if (posture) calibrationEngine.recordPosture(posture);
+
+        if (wantHeadPass) {
+          samplesRef.current = [];
+          phaseStartRef.current = performance.now();
+          setPhase('settle');
+          setProgress(0);
+          setStage('head_pass');
+        } else {
+          setHeadPassOutcome('skipped');
+          startValidationPhase();
+        }
+      } else {
+        completeValidation();
+      }
+    };
 
     const tick = () => {
       const elapsed = performance.now() - phaseStartRef.current;
+      const settledNow = liveGazeRef.current?.isFixating ?? false;
 
       if (phase === 'settle') {
-        setProgress(Math.min(1, elapsed / SETTLE_MS));
-        if (elapsed >= SETTLE_MS) {
+        // Waiting for the eye to arrive and stop. The ring shows this as a
+        // gentle hold rather than progress, so the client is not being told
+        // something is happening when nothing is.
+        setProgress(Math.min(0.999, elapsed / SETTLE_TIMEOUT_MS));
+
+        const readyToCollect = elapsed >= MIN_SETTLE_MS && settledNow;
+        if (readyToCollect || elapsed >= SETTLE_TIMEOUT_MS) {
           setPhase('collect');
           setProgress(0);
           phaseStartRef.current = performance.now();
         }
       } else {
-        setProgress(Math.min(1, elapsed / collectDuration));
-        if (elapsed >= collectDuration) {
-          if (stage === 'capture') finishCapturePoint(currentTarget);
-          else finishValidatePoint(currentTarget);
+        // Progress tracks samples banked, not seconds elapsed, so looking away
+        // stops the ring instead of quietly filling it with rubbish.
+        const banked = settledSamplesRef.current.length;
+        setProgress(Math.min(1, banked / wanted));
 
-          const next = targetIndex + 1;
-          if (next < targets.length) {
-            beginPoint(next);
-          } else if (stage === 'capture') {
-            // Drop any point the rest of the grid clearly disagrees with,
-            // before it gets a chance to distort the head-movement fit and the
-            // accuracy check downstream of it.
-            setPrunedPoints(calibrationEngine.pruneOutlierAnchors().removed);
-
-            // The posture held during calibration is what the mapping is tied
-            // to, so it becomes the reference for later drift warnings.
-            const posture = liveGazeRef.current?.headPose;
-            if (posture) calibrationEngine.recordPosture(posture);
-            validationResultsRef.current = [];
-            framesSeenRef.current = 0;
-            framesUsedRef.current = 0;
-            setStage('validate');
-            beginPoint(0);
-          } else {
-            completeValidation();
-          }
+        if (banked >= wanted || elapsed >= COLLECT_TIMEOUT_MS) {
+          advance();
           return;
         }
       }
@@ -356,10 +432,12 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     targetIndex,
     currentTarget,
     targets.length,
+    wantHeadPass,
     beginPoint,
     finishCapturePoint,
     finishValidatePoint,
     completeValidation,
+    startValidationPhase,
     tracker,
   ]);
 
@@ -495,6 +573,7 @@ const PositionStage: React.FC<{
             'Sit so the screen fills a comfortable part of your view, roughly an arm’s length away.',
             'Set the screen angle now and leave it there. On a laptop, tilting the lid afterwards moves the camera and undoes the calibration.',
             'Light your face from the front. A window or lamp behind you leaves the eyes in shadow.',
+            'On a Mac, turn off Centre Stage, Portrait and Studio Light in Control Centre. Centre Stage re-frames the picture as you move, which pulls the calibration apart underneath you.',
             'If you have a chin or forehead rest, use it. It removes the single largest source of drift.',
           ].map((tip, i) => (
             <li key={i} className="flex gap-3 text-sm text-ink-soft leading-relaxed">
@@ -573,6 +652,7 @@ const PositionStage: React.FC<{
             </p>
           </div>
           <DistanceCheck />
+          <GazeRangeCheck />
         </div>
 
         <div className="surface rounded-2xl p-5">
@@ -601,11 +681,16 @@ const CaptureStage: React.FC<{
   const collecting = phase === 'collect';
   const ringRadius = 30;
   const circumference = 2 * Math.PI * ringRadius;
+  const position = targetViewportNorm(spec);
 
   return (
     <div className="flex-1 relative">
       <p className="absolute top-8 left-1/2 -translate-x-1/2 text-sm text-ink-soft text-center max-w-sm">
-        {isValidation ? 'Nearly there — look at each dot and hold still.' : 'Look at the middle of the dot and hold still.'}
+        {collecting
+          ? 'Keep holding.'
+          : isValidation
+          ? 'Nearly there — look at each dot and hold still.'
+          : 'Look at the middle of the dot and hold still.'}
       </p>
 
       {/*
@@ -620,29 +705,39 @@ const CaptureStage: React.FC<{
       */}
       <div
         className="fixed -translate-x-1/2 -translate-y-1/2"
-        style={{ left: `${spec.xPercent}%`, top: `${spec.yPercent}%` }}
+        style={{ left: `${position.xNorm * 100}%`, top: `${position.yNorm * 100}%` }}
       >
         <svg width={80} height={80} className="overflow-visible">
           <circle cx={40} cy={40} r={ringRadius} fill="none" stroke="var(--border-strong)" strokeWidth={3} />
+          {/*
+            The ring only fills while the eye is actually settled, so it visibly
+            stalls if the client looks away. That honesty matters: a ring that
+            fills regardless teaches everyone to trust a point that was never
+            really captured.
+          */}
+          {collecting && (
+            <circle
+              cx={40}
+              cy={40}
+              r={ringRadius}
+              fill="none"
+              stroke="var(--color-sage-500)"
+              strokeWidth={3}
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={circumference * (1 - progress)}
+              transform="rotate(-90 40 40)"
+              style={{ transition: 'stroke-dashoffset 90ms linear' }}
+            />
+          )}
+          {/* While waiting, the dot breathes rather than filling a ring —
+              something to rest the eye on, without implying progress. */}
           <circle
             cx={40}
             cy={40}
-            r={ringRadius}
-            fill="none"
-            stroke={collecting ? 'var(--color-sage-500)' : 'var(--color-clay-300)'}
-            strokeWidth={3}
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            strokeDashoffset={circumference * (1 - progress)}
-            transform="rotate(-90 40 40)"
-          />
-          {/* The inner dot shrinks as the eye settles, which pulls fixation to
-              a smaller and smaller area and tightens the capture. */}
-          <circle
-            cx={40}
-            cy={40}
-            r={collecting ? 4 : 4 + (1 - progress) * 7}
-            fill={collecting ? 'var(--color-sage-500)' : 'var(--color-ink-soft)'}
+            r={collecting ? 4 : 7}
+            fill={collecting ? 'var(--color-sage-500)' : 'var(--color-clay-400)'}
+            className={collecting ? undefined : 'animate-pulse'}
           />
         </svg>
       </div>
@@ -738,7 +833,7 @@ const GRADE_COPY: Record<ValidationResult['grade'], { label: string; tone: strin
     label: 'Needs another go',
     tone: 'text-clay-500 bg-clay-100 border-clay-300',
     advice:
-      'Something is working against the tracker. The usual causes are light behind the head, glasses reflecting the screen, sitting off to one side of the camera, or moving between the set-up and the check.',
+      'Something physical is usually behind this rather than anything in the software. In rough order of how often it is the cause: sitting too close, so the screen edges are further off centre than a webcam can follow; Centre Stage or Portrait mode re-framing the picture on a Mac; light behind the head; glasses reflecting the screen; or moving between the set-up and the check.',
   },
 };
 
@@ -849,6 +944,10 @@ const ResultStage: React.FC<{
             </p>
           </div>
         )}
+
+        {/* The most likely physical cause of a poor result, checked and stated
+            here rather than left in the generic advice above. */}
+        {validation.grade !== 'excellent' && validation.grade !== 'good' && <GazeRangeCheck />}
 
         {validation.distanceCm !== null && (validation.distanceCm < 32 || validation.distanceCm > 95) && (
           <div className="rounded-2xl border border-honey-300 bg-honey-100 px-4 py-3">

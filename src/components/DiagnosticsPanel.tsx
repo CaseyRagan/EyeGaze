@@ -100,6 +100,8 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       screen: `${window.screen?.width}x${window.screen?.height}`,
       devicePixelRatio: window.devicePixelRatio,
       mmPerPixel: Number(viewingGeometry.getMillimetresPerPixel().toFixed(4)),
+      workingAreaScale: geometry.workingAreaScale,
+      halfAngleDeg: Number(viewingGeometry.getViewportHalfAngleDeg().toFixed(1)),
     },
     calibration: {
       isCalibrated: model.isCalibrated,
@@ -241,6 +243,27 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
             {report.distance.userScale !== 1 && (
               <Row label="Your correction" value={`x${report.distance.userScale}`} />
             )}
+          </Group>
+
+          <Group title="How much eye movement the screen demands">
+            <Row
+              label="Screen edges are"
+              value={`${report.screen.halfAngleDeg}° off centre`}
+              warn={report.screen.halfAngleDeg > 22}
+              note={
+                report.screen.halfAngleDeg > 22
+                  ? 'Past about 22° the iris starts hiding behind the eyelid and accuracy falls away — sit further back or reduce the working area'
+                  : undefined
+              }
+            />
+            <Row
+              label="Working area"
+              value={
+                report.screen.workingAreaScale >= 0.99
+                  ? 'whole window'
+                  : `${Math.round(report.screen.workingAreaScale * 100)}% of the window`
+              }
+            />
           </Group>
 
           <Group title="Signal right now">

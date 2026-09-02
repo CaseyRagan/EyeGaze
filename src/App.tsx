@@ -16,6 +16,7 @@ import {
 import { ActivityMode, TrackingSettings } from './types';
 import { DEFAULT_TRACKING_SETTINGS, FaceMeshTracker, TrackerStatus } from './services/faceMeshTracker';
 import { calibrationEngine } from './services/calibration';
+import { viewingGeometry } from './services/viewingGeometry';
 import { soundEngine } from './services/audio';
 import { GazePointer } from './components/GazePointer';
 import { CameraPreview } from './components/CameraPreview';
@@ -148,6 +149,19 @@ export default function App() {
   const activeDefinition = ACTIVITIES.find(a => a.id === activeTab)!;
   const isBusy = trackerStatus !== 'running' && !mouseMode;
 
+  // Activities are laid out inside this box rather than the whole window, so a
+  // reduced working area shrinks every one of them at once instead of needing
+  // each to understand the concept.
+  const workingArea = viewingGeometry.getWorkingArea();
+  const workingInset =
+    workingArea.width < window.innerWidth
+      ? {
+          marginLeft: workingArea.left,
+          marginRight: workingArea.left,
+          marginBottom: workingArea.top * 2,
+        }
+      : undefined;
+
   return (
     <div
       onPointerMove={handlePointerMove}
@@ -235,7 +249,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="relative flex-1 overflow-hidden">
+      <main className="relative flex-1 overflow-hidden" style={workingInset}>
         {activeTab === 'single_line' && (
           <GazePaint settings={settings} onUpdateSettings={handleUpdateSettings} />
         )}
