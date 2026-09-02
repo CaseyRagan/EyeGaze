@@ -1,10 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Monitor, RotateCcw, Sliders, Sun, Volume2, X } from 'lucide-react';
+import { Monitor, RotateCcw, Sliders, Stethoscope, Sun, Volume2, X } from 'lucide-react';
 import { TrackingEngineMode, TrackingSettings } from '../types';
 import { calibrationEngine } from '../services/calibration';
 import { viewingGeometry } from '../services/viewingGeometry';
+import { DistanceCheck } from './DistanceCheck';
 import { soundEngine } from '../services/audio';
-import { useThrottledGaze } from '../services/gazeBus';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -14,6 +14,7 @@ interface SettingsPanelProps {
   onClose: () => void;
   onUpdateSettings: (patch: Partial<TrackingSettings>) => void;
   onRecalibrate: () => void;
+  onOpenDiagnostics: () => void;
 }
 
 const ENGINE_MODES: Array<{ value: TrackingEngineMode; label: string; detail: string }> = [
@@ -31,6 +32,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onClose,
   onUpdateSettings,
   onRecalibrate,
+  onOpenDiagnostics,
 }) => {
   const [geometry, setGeometry] = useState(viewingGeometry.getSettings());
 
@@ -278,82 +280,21 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               Clear saved calibration
             </button>
           </Section>
+
+          <Section title="Something not right?" icon={Stethoscope}>
+            <p className="text-xs text-ink-soft leading-relaxed">
+              Shows exactly what the tracker is seeing — camera, distance, head pose, calibration —
+              with a copy button. Far quicker to read than to describe.
+            </p>
+            <button
+              onClick={onOpenDiagnostics}
+              className="w-full py-3 rounded-xl border border-strong text-ink font-medium hover:bg-[var(--surface-sunken)] transition-colors"
+            >
+              Open diagnostics
+            </button>
+          </Section>
         </div>
       </aside>
-    </div>
-  );
-};
-
-/**
- * Lets the user anchor the distance estimate to a real measurement.
- *
- * Every accuracy figure the app reports in degrees is computed from this
- * number, so an estimate that is out by a factor of three turns a two-degree
- * result into a nine-degree one and sends someone chasing a tracking problem
- * that does not exist. Thirty seconds with a tape measure removes the whole
- * class of error.
- */
-const DistanceCheck: React.FC<{ onChanged: () => void }> = ({ onChanged }) => {
-  const gaze = useThrottledGaze(3);
-  const [entry, setEntry] = useState('');
-  const [saved, setSaved] = useState(false);
-
-  const measured = viewingGeometry.getMeasuredDistanceCm();
-  const agreement = viewingGeometry.getMeasurementAgreement();
-  const reliable = viewingGeometry.isDistanceMeasured();
-
-  const apply = () => {
-    const value = Number(entry);
-    if (!Number.isFinite(value)) return;
-    if (viewingGeometry.calibrateDistance(value)) {
-      setSaved(true);
-      setEntry('');
-      onChanged();
-      window.setTimeout(() => setSaved(false), 2500);
-    }
-  };
-
-  return (
-    <div className="rounded-xl surface-quiet px-4 py-3 space-y-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm text-ink">Right now it reads</span>
-        <span className="text-sm font-semibold text-ink tabular-nums">
-          {gaze && measured !== null ? `${measured.toFixed(0)} cm` : '—'}
-        </span>
-      </div>
-
-      {!reliable && measured !== null && (
-        <p className="text-xs text-honey-700 leading-relaxed">
-          The two estimates disagree{agreement > 0 ? ` (${Math.round(agreement * 100)}% agreement)` : ''}, so
-          the setting above is being used instead. Correcting it below will fix that.
-        </p>
-      )}
-
-      <p className="text-xs text-ink-soft leading-relaxed">
-        If that is wrong, measure from your eyes to the screen and type the real number. Everything
-        after that is scaled to match.
-      </p>
-
-      <div className="flex gap-2">
-        <input
-          type="number"
-          inputMode="decimal"
-          min={20}
-          max={150}
-          value={entry}
-          onChange={e => setEntry(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && apply()}
-          placeholder="cm"
-          className="flex-1 min-w-0 px-3 py-2 rounded-lg border border-soft bg-[var(--surface-raised)] text-sm text-ink"
-        />
-        <button
-          onClick={apply}
-          disabled={!entry || measured === null}
-          className="px-4 py-2 rounded-lg bg-sage-500 hover:bg-sage-600 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
-        >
-          {saved ? 'Saved' : 'Set'}
-        </button>
-      </div>
     </div>
   );
 };

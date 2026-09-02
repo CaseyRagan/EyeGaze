@@ -85,10 +85,10 @@ function makeSamples(xNorm: number, yNorm: number, noise: number, count = 30, po
       translateX: posture.translateX + gaussian(0.004),
       translateY: posture.translateY + gaussian(0.004),
     };
-    const truth = trueFeatureFor(xNorm, yNorm, jittered);
+    const eyes = perEyeFeatures(xNorm, yNorm, jittered, noise);
     return {
-      gx: truth.gx + gaussian(noise),
-      gy: truth.gy + gaussian(noise),
+      gx: eyes.gx,
+      gy: eyes.gy,
       headYaw: jittered.yaw,
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
@@ -119,6 +119,39 @@ const TEST_POINTS: Array<[number, number]> = [
   [0.28, 0.28], [0.72, 0.28], [0.5, 0.5], [0.28, 0.72], [0.72, 0.72],
   [0.06, 0.5], [0.94, 0.5], [0.5, 0.08], [0.5, 0.92],
 ];
+
+/**
+ * The same truth, split across two eyes that are not identical.
+ *
+ * Real faces are not symmetric: one eye usually sits slightly further from the
+ * camera or at a slightly different angle, so the two eyes report subtly
+ * different gains for the same gaze. Each also carries its own independent
+ * landmark noise. Modelled here as a gain difference plus an offset — exactly
+ * what a 50/50 average cannot represent and a difference term can.
+ */
+const EYE_GAIN = { left: 1.12, right: 0.9 };
+const EYE_OFFSET = { left: 0.004, right: -0.003 };
+
+/**
+ * How much noisier one eye is than the other. Asymmetry like this is ordinary:
+ * a spectacle frame edge, glare on one lens, a droopy lid, or simply sitting
+ * slightly off-axis so one eye is further from the camera.
+ */
+const rightEyeNoiseMultiplier = 1;
+
+function perEyeFeatures(xNorm: number, yNorm: number, posture: Posture, noise: number) {
+  const truth = trueFeatureFor(xNorm, yNorm, posture);
+  const rightNoise = noise * rightEyeNoiseMultiplier;
+  const leftGx = truth.gx * EYE_GAIN.left + EYE_OFFSET.left + gaussian(noise);
+  const leftGy = truth.gy * EYE_GAIN.left + gaussian(noise);
+  const rightGx = truth.gx * EYE_GAIN.right + EYE_OFFSET.right + gaussian(rightNoise);
+  const rightGy = truth.gy * EYE_GAIN.right + gaussian(rightNoise);
+
+  return {
+    gx: (leftGx + rightGx) / 2,
+    gy: (leftGy + rightGy) / 2,
+  };
+}
 
 /** Reset before each scenario so scenarios do not perturb one another. */
 function reseed() {
@@ -176,8 +209,8 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     let spanX = { min: Infinity, max: -Infinity };
 
     for (const [x, y] of TEST_POINTS) {
-      const truth = trueFeatureFor(x, y);
-      const mapped = engine.mapToScreen(truth.gx, truth.gy, headPose, WIDTH, HEIGHT);
+      const eyes = perEyeFeatures(x, y, STILL, 0);
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, headPose, WIDTH, HEIGHT);
       if (!mapped) {
         console.log(`FAIL  ${gridName} / ${noise.label}: no mapping returned`);
         failures++;
@@ -233,10 +266,10 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   const evaluate = (engine: InstanceType<typeof CalibrationEngine>, posture: Posture) => {
     let sum = 0;
     for (const [x, y] of TEST_POINTS) {
-      const truth = trueFeatureFor(x, y, posture);
+      const eyes = perEyeFeatures(x, y, posture, 0);
       const mapped = engine.mapToScreen(
-        truth.gx,
-        truth.gy,
+        eyes.gx,
+        eyes.gy,
         { yaw: posture.yaw, pitch: posture.pitch, roll: 0, translateX: posture.translateX, translateY: posture.translateY, distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1 },
         WIDTH,
         HEIGHT
@@ -279,10 +312,10 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       translateX: posture.translateX + gaussian(0.002),
       translateY: posture.translateY + gaussian(0.002),
     };
-    const truth = trueFeatureFor(0.5, 0.5, jittered);
+    const eyes = perEyeFeatures(0.5, 0.5, jittered, 0.0016);
     return {
-      gx: truth.gx + gaussian(0.0016),
-      gy: truth.gy + gaussian(0.0016),
+      gx: eyes.gx,
+      gy: eyes.gy,
       headYaw: jittered.yaw,
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
@@ -352,8 +385,8 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   const measure = () => {
     let sum = 0;
     for (const [x, y] of TEST_POINTS) {
-      const truth = trueFeatureFor(x, y);
-      const mapped = engine.mapToScreen(truth.gx, truth.gy, headPose, WIDTH, HEIGHT)!;
+      const eyes = perEyeFeatures(x, y, STILL, 0);
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, headPose, WIDTH, HEIGHT)!;
       sum += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
     }
     return viewingGeometry.pixelsToDegrees(sum / TEST_POINTS.length);

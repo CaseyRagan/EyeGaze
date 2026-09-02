@@ -183,9 +183,34 @@ function decomposeTransform(matrix?: Float32Array | number[]): {
   return { yaw, pitch, roll, distanceCm: Math.abs(tz) };
 }
 
+/**
+ * Raw intermediate values, surfaced so a poor result can be diagnosed rather
+ * than guessed at.
+ *
+ * Every accuracy problem so far has been a plausible-looking number produced by
+ * a broken intermediate — a transposed matrix, a distance three times too
+ * small. None of them were visible from the outside, which is why these are
+ * exposed even though nothing in the tracking reads them.
+ */
+export interface FeatureDiagnostics {
+  /** Which ordering the transformation matrix turned out to be in. */
+  matrixLayout: MatrixLayout | 'undetectable' | 'absent';
+  /** Distance from the face model's translation, in cm, before cross-checking. */
+  modelDistanceCm: number | null;
+  /** Distance from the apparent iris size, in cm, before cross-checking. */
+  irisDistanceCm: number | null;
+  /** Apparent iris diameter in normalised image units. */
+  irisDiameterNorm: number;
+  /** Landmarks reported for this frame. */
+  landmarkCount: number;
+  /** True when head pose came from facial proportions rather than the matrix. */
+  usedFallbackHeadPose: boolean;
+}
+
 export interface ExtractionResult {
   features: GazeFeatures;
   headPose: HeadPose;
+  diagnostics: FeatureDiagnostics;
 }
 
 export function extractGazeFeatures(
@@ -316,6 +341,17 @@ export function extractGazeFeatures(
 
   const faceCentre: Vec2 = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
 
+  const diagnostics: FeatureDiagnostics = {
+    matrixLayout: !transformMatrix || transformMatrix.length < 16
+      ? 'absent'
+      : detectMatrixLayout(transformMatrix) ?? 'undetectable',
+    modelDistanceCm: modelDistance,
+    irisDistanceCm: irisDistance,
+    irisDiameterNorm,
+    landmarkCount: landmarks.length,
+    usedFallbackHeadPose: decomposed === null,
+  };
+
   const headPose: HeadPose = {
     yaw,
     pitch,
@@ -396,5 +432,5 @@ export function extractGazeFeatures(
     quality,
   };
 
-  return { features, headPose };
+  return { features, headPose, diagnostics };
 }

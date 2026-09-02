@@ -1,7 +1,7 @@
 import { FaceLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
 import { CalibrationSample, GazeState, HeadPose, OcularEvent, Point2D, TrackingSettings } from '../types';
 import { calibrationEngine } from './calibration';
-import { extractGazeFeatures } from './gazeFeatures';
+import { FeatureDiagnostics, extractGazeFeatures } from './gazeFeatures';
 import { gazeBus } from './gazeBus';
 import { soundEngine } from './audio';
 import { OneEuroFilter2D } from './oneEuroFilter';
@@ -92,6 +92,9 @@ export class FaceMeshTracker {
   private simulatedPointer = false;
   private pointerLoopId: number | null = null;
   private pointerPosition: Point2D | null = null;
+
+  private lastDiagnostics: FeatureDiagnostics | null = null;
+  private frameTimes: number[] = [];
 
   /** Live sample sink used by the calibration screens. */
   private sampleCollector: ((sample: CalibrationSample, gaze: GazeState, usable: boolean) => void) | null = null;
@@ -241,6 +244,26 @@ export class FaceMeshTracker {
     return this.videoElement;
   }
 
+  /**
+   * A snapshot of everything the tracker knows about its own inputs.
+   *
+   * Deliberately not part of GazeState: this is read a few times a second by a
+   * panel, not sixty times a second by the render loop.
+   */
+  public getDiagnostics(): {
+    features: FeatureDiagnostics | null;
+    fps: number;
+    resolution: { width: number; height: number } | null;
+    headPose: HeadPose | null;
+  } {
+    return {
+      features: this.lastDiagnostics,
+      fps: this.frameTimes.length,
+      resolution: this.getCaptureResolution(),
+      headPose: this.lastHeadPose,
+    };
+  }
+
   /** Actual capture resolution, once the browser has picked one. */
   public getCaptureResolution(): { width: number; height: number } | null {
     const track = this.stream?.getVideoTracks()[0];
@@ -317,8 +340,13 @@ export class FaceMeshTracker {
       return;
     }
 
-    const { features, headPose } = extracted;
+    const { features, headPose, diagnostics } = extracted;
     this.lastHeadPose = headPose;
+    this.lastDiagnostics = diagnostics;
+
+    // Rolling frame rate over the last second, for the diagnostics readout.
+    this.frameTimes.push(now);
+    while (this.frameTimes.length > 0 && now - this.frameTimes[0] > 1000) this.frameTimes.shift();
     viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm, headPose.distanceAgreement);
 
     // --- Blink bookkeeping ---------------------------------------------------

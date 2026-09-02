@@ -22,6 +22,7 @@ import { CameraPreview } from './components/CameraPreview';
 import { CalibrationFlow } from './components/CalibrationFlow';
 import { RecentreOverlay } from './components/RecentreOverlay';
 import { SettingsPanel } from './components/SettingsPanel';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { HeadAlignmentGuide } from './components/HeadAlignmentGuide';
 import { SessionBar } from './components/SessionBar';
 import { GazePaint } from './components/GazePaint';
@@ -61,6 +62,7 @@ export default function App() {
   const [isCalibrationOpen, setIsCalibrationOpen] = useState(false);
   const [isRecentreOpen, setIsRecentreOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
   const [mouseMode, setMouseMode] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dim'>('light');
   const [toast, setToast] = useState<string | null>(null);
@@ -382,6 +384,16 @@ export default function App() {
           setIsSettingsOpen(false);
           setIsCalibrationOpen(true);
         }}
+        onOpenDiagnostics={() => {
+          setIsSettingsOpen(false);
+          setIsDiagnosticsOpen(true);
+        }}
+      />
+
+      <DiagnosticsPanel
+        isOpen={isDiagnosticsOpen}
+        tracker={trackerRef.current}
+        onClose={() => setIsDiagnosticsOpen(false)}
       />
 
       {toast && (

@@ -20,6 +20,7 @@ import { FaceMeshTracker } from '../services/faceMeshTracker';
 import { soundEngine } from '../services/audio';
 import { viewingGeometry } from '../services/viewingGeometry';
 import { PostureGuide } from './PostureGuide';
+import { DistanceCheck } from './DistanceCheck';
 import { gazeBus } from '../services/gazeBus';
 
 type Stage = 'position' | 'capture' | 'head_pass' | 'validate' | 'result';
@@ -40,6 +41,8 @@ const SETTLE_MS = 650;
 const COLLECT_MS = 900;
 /** Validation dwells are longer, because precision needs more samples. */
 const VALIDATE_COLLECT_MS = 1100;
+/** Below this many settled samples, fall back to using everything collected. */
+const MIN_SETTLED_SAMPLES = 8;
 /** Length of the head-movement pass. Long enough to cover a full sweep twice. */
 const HEAD_PASS_SETTLE_MS = 900;
 const HEAD_PASS_COLLECT_MS = 6000;
@@ -86,6 +89,18 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const [headPassOutcome, setHeadPassOutcome] = useState<'pending' | 'measured' | 'skipped' | 'failed'>('pending');
 
   const samplesRef = useRef<CalibrationSample[]>([]);
+  /**
+   * Samples taken while the eye was actually settled.
+   *
+   * The settle delay before each capture is a guess at how long it takes to
+   * find a new dot and land on it. When the guess is short — an older client, a
+   * dot in an awkward corner, a moment's inattention — the capture window opens
+   * while the eye is still travelling, and those in-flight samples drag the
+   * point's median away from where the client eventually looked. Preferring
+   * settled samples removes the guesswork; keeping the full set as a fallback
+   * means a client whose gaze never quite settles still calibrates.
+   */
+  const settledSamplesRef = useRef<CalibrationSample[]>([]);
   const gazePointsRef = useRef<Array<{ x: number; y: number }>>([]);
   const framesSeenRef = useRef(0);
   const framesUsedRef = useRef(0);
@@ -110,6 +125,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     setPhase('settle');
     setProgress(0);
     samplesRef.current = [];
+    settledSamplesRef.current = [];
     gazePointsRef.current = [];
     phaseStartRef.current = performance.now();
     soundEngine.playChime(560, 0.1);
@@ -125,11 +141,14 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
   const finishCapturePoint = useCallback(
     (spec: CalibrationPointSpec) => {
+      const settled = settledSamplesRef.current;
+      const chosen = settled.length >= MIN_SETTLED_SAMPLES ? settled : samplesRef.current;
+
       const anchor = calibrationEngine.addAnchorFromSamples(
         `grid-${spec.id}`,
         spec.xPercent / 100,
         spec.yPercent / 100,
-        samplesRef.current,
+        chosen,
         spec.label
       );
 
@@ -240,6 +259,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       if (!usable) return;
       framesUsedRef.current++;
       samplesRef.current.push(sample);
+      if (gaze.isFixating) settledSamplesRef.current.push(sample);
       gazePointsRef.current.push({ x: gaze.screenX, y: gaze.screenY });
     });
 
@@ -534,6 +554,27 @@ const PositionStage: React.FC<{
 
       <div className="space-y-4">
         <PostureGuide />
+
+        {/*
+          Distance belongs here, not buried in settings.
+
+          The accuracy figure this whole flow produces is expressed in degrees,
+          and degrees are computed from the viewing distance. An estimate that is
+          out by a factor of two reports twice the error the client actually has,
+          and sends a clinician chasing a tracking problem that does not exist.
+          Thirty seconds here removes that entire class of mistake.
+        */}
+        <div className="surface rounded-2xl p-5 space-y-3">
+          <div>
+            <h4 className="text-sm font-semibold text-ink">How far away are you?</h4>
+            <p className="text-xs text-ink-soft mt-1 leading-relaxed">
+              The accuracy figure at the end is measured in degrees, which depends on this. Worth
+              thirty seconds with a tape measure once.
+            </p>
+          </div>
+          <DistanceCheck />
+        </div>
+
         <div className="surface rounded-2xl p-5">
           <h4 className="text-sm font-semibold text-ink mb-2">What happens next</h4>
           <p className="text-sm text-ink-soft leading-relaxed">

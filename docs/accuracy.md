@@ -242,6 +242,21 @@ drops at most two of them. On synthetic data with one point captured while the
 client looked at the opposite corner, this takes the result from 2.06 to 0.85
 degrees; on a clean grid it removes nothing.
 
+## Things that were tried and did not help
+
+Recorded so nobody spends the afternoon re-deriving them.
+
+**Feeding the two eyes in separately.** The binocular estimate averages the left
+and right eye 50/50. Handing the regression the difference between them instead
+lets it learn the weighting that best predicts gaze, which should help when one
+eye is noisier — a spectacle frame, glare on one lens, sitting slightly
+off-axis. Measured on synthetic data with one eye four times noisier than the
+other, it was worth about 5%. The reason is that each calibration point is
+already a median over roughly thirty samples, which removes most of the
+per-sample noise this was meant to address; what remains is structural fit
+error, and re-weighting the eyes does not touch it. Two extra model parameters
+for 5% is a bad trade on real data, so the average stands.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five

@@ -165,6 +165,14 @@ export const VALIDATION_TARGETS: CalibrationPointSpec[] = [
  * Builds the design row for one sample, from an already head-compensated
  * feature.
  *
+ * The last pair of terms is the difference between what the two eyes report.
+ * Averaging them 50/50 and discarding the difference throws away information:
+ * the two eyes carry partly independent landmark noise, and real faces are not
+ * symmetric — one eye is often slightly further from the camera, or more
+ * occluded, or simply shaped differently. Handing the difference to the
+ * regression lets it find the weighting that actually predicts this person's
+ * gaze, rather than assuming the two eyes deserve equal say.
+ *
  * The polynomial's job is only the eye-to-screen relationship. Head pose is
  * handled entirely by compensateForHead, upstream of this, and deliberately
  * does not appear here as an additive output term: an additive term after a
