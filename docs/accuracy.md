@@ -3,6 +3,54 @@
 This is the reasoning behind the tracking pipeline, and the honest answer to
 "how accurate can this get, and would a head frame help?"
 
+## The two image axes were never in the same unit
+
+This one sat underneath everything else for the whole project, and none of the
+existing checks could see it, because they all started from synthetic *features*
+and tested the mapping built on top of them. The step underneath — landmarks into
+features — had no test at all.
+
+MediaPipe normalises landmark `x` by the image width and `y` by the image height.
+On a 1280x720 camera one vertical unit is therefore **1.778 horizontal units**.
+Every length in `gazeFeatures.ts` was computed with `hypot` across those two axes
+as though they were the same: the iris radius, the eye width, the distance
+between the eyes, the eyelid aperture.
+
+`scripts/geometryCheck.ts` builds a face of known size at a known distance,
+projects it through a pinhole camera into an image of a known shape, normalises
+the result the way MediaPipe does, and asks the extractor what it sees. Before
+the fix:
+
+| measurement | truth | reported |
+|---|---|---|
+| distance | 40 / 50 / 60 cm | 28.8 / 36.0 / 43.2 cm — **0.720x**, at every distance |
+| head roll | 7° | 12.3° |
+| head roll | 15° | 25.5° |
+| vertical vs horizontal gaze sensitivity | 1.000 | **1.778** — exactly the aspect ratio |
+| horizontal estimate while rolling the head 15° | no movement | 3.9% of the screen |
+
+After: 1.000x at every distance, roll exact, sensitivity ratio 1.000, and the
+roll drift down to 0.9%.
+
+What it was costing:
+
+- **Every figure quoted in degrees**, because they all scale with the viewing
+  distance, and the iris ruler was reading 28% short. So was the advice about
+  where to sit — "aim for 45 cm" was seating people at about 62.
+- **Vertical head compensation.** The constant is derived from the image width,
+  but it was being applied to a vertical feature inflated by 1.778, so the pitch
+  term was under-applied by that factor.
+- **Anyone who tilts their head.** The eye basis is built from the line between
+  the eyes; in a stretched space it over-rotates, and the horizontal estimate
+  drifts with a pose nothing downstream is told about.
+- **The blink thresholds**, which are an aperture-to-width ratio. They were tuned
+  by eye on a 16:9 camera with that camera's stretch baked in, so they quietly
+  meant something different on a 4:3 webcam. They are now divided through by it.
+
+Because the gaze features changed meaning, the stored calibration key moved to
+`v4`: a model fitted before this is wrong in a way nothing downstream could
+detect, so old ones are dropped rather than loaded.
+
 ## What limits accuracy
 
 The error you actually experience is the sum of four things. They are listed in
@@ -160,6 +208,41 @@ aliased. No amount of cleverness separates them from that data.
 Holding the target fixed while the head moves removes the ambiguity. Every bit
 of variation in the measurement is then head-driven, and a plain three-parameter
 regression recovers the coefficients directly.
+
+### Rotation and translation cannot be separated from one movement
+
+The pass fits two constants: how much the eye counter-rotates per radian of head
+turn, and how much per unit of sideways head travel. It could not have been
+measuring both, because **you rotate about your neck, not about your eyeballs**.
+Turning your head by dθ also slides your eyes sideways by roughly 10 cm · dθ, so
+the two regressors arrive almost perfectly correlated. Working the constants
+through, the rotation term carries about **eight times** the leverage of the
+translation term, so least squares can trade a small change in one against a
+large change in the other at almost no cost in residual. The split it returns is
+arbitrary, and it is then applied to every prediction afterwards.
+
+A field report showed exactly that: rotation pushed outside its plausible range
+and silently replaced by the fallback, translation left at 0.507, and the
+accuracy check afterwards 2.4x worse than the calibration grid it was fitted on.
+
+The old regression check could not catch it, because it drove the pass with
+`yaw: 0.08·sin(phase)` against `translateX: 0.022·cos(0.9·phase)` — sine against
+cosine at different frequencies, i.e. deliberately decorrelated. A head that
+rotates and translates independently. No neck does that.
+
+Now the fit measures the correlation first and declines to split what moved
+together, fitting the rotation term alone and leaving translation nominal. That
+is a worse model of a pure sideways slide than a good split would be, and a far
+better one than a split invented from collinear data. Measured on the movement
+that fills the ring:
+
+| movement | rotation | translation |
+|---|---|---|
+| turn and nod only | 1.42 (the combined truth) | 1.00 — declined |
+| turn and nod, plus a square-on slide | 1.32 | 1.32 (truth 1.30 / 1.30) |
+
+The second row is the argument for asking the client for two movements rather
+than one, and is why the ring will grow a second phase.
 
 ### How much movement, and how the client knows
 

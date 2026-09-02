@@ -66,11 +66,46 @@ function norm(v: Vec2): number {
  * moved toward larger x" agree, which keeps every downstream sign convention
  * readable.
  */
-function mirrored(landmark: { x: number; y: number }): Vec2 {
-  return { x: 1 - landmark.x, y: landmark.y };
+/**
+ * Puts both axes in the same unit before any of them are measured.
+ *
+ * MediaPipe normalises x by the image width and y by the image height, so on a
+ * 1280x720 camera one vertical unit is 1.78 horizontal units. Every length in
+ * this file — the iris radius, the eye width, the distance between the eyes,
+ * the aperture — was computed with `hypot` across those two axes as though they
+ * were the same, which they are not.
+ *
+ * What that cost, measured against a synthetic face of known size at a known
+ * distance (`scripts/geometryCheck.ts`):
+ *
+ * - the iris ruler read **0.72x** the true distance at every distance, because
+ *   the ring's vertical radii were inflated and the horizontal ones were not.
+ *   Every figure quoted in degrees is scaled by that distance, as is the advice
+ *   about where to sit;
+ * - vertical gaze came out **1.778x** more sensitive than horizontal — exactly
+ *   the aspect ratio — so the vertical head-rotation term, whose constant is
+ *   derived from image width, was under-applied by the same factor;
+ * - the eye basis over-rotated: a 7 degree head roll read as 12.3, and a 15
+ *   degree roll as 25.5, which drags the horizontal estimate by up to 4% of the
+ *   screen when someone tilts their head while holding their gaze still.
+ *
+ * Dividing y by the aspect ratio expresses everything in image widths, which is
+ * the unit the field-of-view constants were already written for.
+ */
+function framed(landmark: { x: number; y: number }, aspect: number): Vec2 {
+  return { x: 1 - landmark.x, y: landmark.y / aspect };
 }
 
-function measureEye(landmarks: any[], spec: typeof EYE_A, basisU: Vec2, basisV: Vec2): EyeMeasurement | null {
+/** Webcams are overwhelmingly 16:9; used only when the caller cannot say. */
+const FALLBACK_IMAGE_ASPECT = 16 / 9;
+
+function measureEye(
+  landmarks: any[],
+  spec: typeof EYE_A,
+  basisU: Vec2,
+  basisV: Vec2,
+  aspect: number
+): EyeMeasurement | null {
   const outer = landmarks[spec.outer];
   const inner = landmarks[spec.inner];
   const top = landmarks[spec.top];
@@ -78,11 +113,11 @@ function measureEye(landmarks: any[], spec: typeof EYE_A, basisU: Vec2, basisV: 
   const iris = landmarks[spec.iris];
   if (!outer || !inner || !top || !bottom || !iris) return null;
 
-  const o = mirrored(outer);
-  const i = mirrored(inner);
-  const t = mirrored(top);
-  const b = mirrored(bottom);
-  const ir = mirrored(iris);
+  const o = framed(outer, aspect);
+  const i = framed(inner, aspect);
+  const t = framed(top, aspect);
+  const b = framed(bottom, aspect);
+  const ir = framed(iris, aspect);
 
   const width = norm(sub(i, o));
   if (width < 1e-5) return null;
@@ -104,7 +139,7 @@ function measureEye(landmarks: any[], spec: typeof EYE_A, basisU: Vec2, basisV: 
   for (const idx of spec.irisRing) {
     const p = landmarks[idx];
     if (!p) continue;
-    irisRadius += norm(sub(mirrored(p), ir));
+    irisRadius += norm(sub(framed(p, aspect), ir));
     ringSamples++;
   }
   irisRadius = ringSamples > 0 ? irisRadius / ringSamples : 0;
@@ -216,9 +251,16 @@ export interface ExtractionResult {
 export function extractGazeFeatures(
   landmarks: any[],
   blendshapes: Record<string, number>,
-  transformMatrix?: Float32Array | number[]
+  transformMatrix?: Float32Array | number[],
+  /** Image width divided by image height, so both axes can be measured alike. */
+  imageAspect?: number
 ): ExtractionResult | null {
   if (!landmarks || landmarks.length < 478) return null;
+
+  const aspect =
+    typeof imageAspect === 'number' && Number.isFinite(imageAspect) && imageAspect > 0
+      ? imageAspect
+      : FALLBACK_IMAGE_ASPECT;
 
   // --- Build the head-aligned basis from the inter-eye line -----------------
   const aOuter = landmarks[EYE_A.outer];
@@ -228,12 +270,12 @@ export function extractGazeFeatures(
   if (!aOuter || !aInner || !bOuter || !bInner) return null;
 
   const centreA: Vec2 = {
-    x: (mirrored(aOuter).x + mirrored(aInner).x) / 2,
-    y: (mirrored(aOuter).y + mirrored(aInner).y) / 2,
+    x: (framed(aOuter, aspect).x + framed(aInner, aspect).x) / 2,
+    y: (framed(aOuter, aspect).y + framed(aInner, aspect).y) / 2,
   };
   const centreB: Vec2 = {
-    x: (mirrored(bOuter).x + mirrored(bInner).x) / 2,
-    y: (mirrored(bOuter).y + mirrored(bInner).y) / 2,
+    x: (framed(bOuter, aspect).x + framed(bInner, aspect).x) / 2,
+    y: (framed(bOuter, aspect).y + framed(bInner, aspect).y) / 2,
   };
 
   // Order the eyes left-to-right in the mirrored frame so the basis always
@@ -247,8 +289,8 @@ export function extractGazeFeatures(
   // Screen convention: y grows downward, so the +90° rotation of u points down.
   const basisV: Vec2 = { x: -basisU.y, y: basisU.x };
 
-  const eyeA = measureEye(landmarks, EYE_A, basisU, basisV);
-  const eyeB = measureEye(landmarks, EYE_B, basisU, basisV);
+  const eyeA = measureEye(landmarks, EYE_A, basisU, basisV, aspect);
+  const eyeB = measureEye(landmarks, EYE_B, basisU, basisV, aspect);
   if (!eyeA && !eyeB) return null;
 
   // --- Head pose ------------------------------------------------------------
@@ -272,11 +314,11 @@ export function extractGazeFeatures(
     const cheekR = landmarks[454];
 
     if (noseTip && chin && forehead && cheekL && cheekR) {
-      const n = mirrored(noseTip);
-      const cl = mirrored(cheekL);
-      const cr = mirrored(cheekR);
-      const f = mirrored(forehead);
-      const c = mirrored(chin);
+      const n = framed(noseTip, aspect);
+      const cl = framed(cheekL, aspect);
+      const cr = framed(cheekR, aspect);
+      const f = framed(forehead, aspect);
+      const c = framed(chin, aspect);
       const faceWidth = Math.abs(cr.x - cl.x) || 1;
       const faceHeight = Math.abs(c.y - f.y) || 1;
       // Scale the normalised offsets into a plausible radian range so the
@@ -357,7 +399,8 @@ export function extractGazeFeatures(
     pitch,
     roll,
     translateX: faceCentre.x - 0.5,
-    translateY: faceCentre.y - 0.5,
+    // Half of one image *width*, because that is the unit y is now in.
+    translateY: faceCentre.y - 0.5 / aspect,
     distanceCm,
     distanceAgreement,
     interocularSpan: span,
@@ -371,8 +414,14 @@ export function extractGazeFeatures(
   // blendshape reacts faster; the aperture is steadier for partial closures.
   const opennessA = eyeA ? eyeA.openness : 0;
   const opennessB = eyeB ? eyeB.openness : 0;
-  const APERTURE_CLOSED = 0.11;
-  const APERTURE_OPEN = 0.26;
+  // Aperture height as a fraction of eye width. These were tuned by eye against
+  // a 1280x720 camera *before* the two image axes were measured in the same
+  // unit, so they carried that camera's 16:9 stretch baked into them — which
+  // also meant they silently meant something different on a 4:3 webcam. Divided
+  // through by that stretch, they now describe the eye rather than the sensor,
+  // and behave identically on the camera they were tuned on.
+  const APERTURE_CLOSED = 0.11 / (16 / 9);
+  const APERTURE_OPEN = 0.26 / (16 / 9);
   const normaliseOpen = (v: number) =>
     Math.max(0, Math.min(1, (v - APERTURE_CLOSED) / (APERTURE_OPEN - APERTURE_CLOSED)));
 

@@ -460,7 +460,15 @@ export class FaceMeshTracker {
 
   private processFrame(landmarks: any[], blendshapes: Record<string, number>, matrix?: Float32Array | number[]) {
     const now = Date.now();
-    const extracted = extractGazeFeatures(landmarks, blendshapes, matrix);
+    // The extractor cannot know the shape of the image it is measuring, and its
+    // landmarks are normalised per axis, so the aspect ratio has to travel with
+    // them or every length it computes is stretched vertically.
+    const video = this.videoElement;
+    const aspect =
+      video && video.videoWidth > 0 && video.videoHeight > 0
+        ? video.videoWidth / video.videoHeight
+        : undefined;
+    const extracted = extractGazeFeatures(landmarks, blendshapes, matrix, aspect);
     if (!extracted) {
       this.emitLost();
       return;

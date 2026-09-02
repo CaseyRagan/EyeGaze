@@ -10,10 +10,21 @@ import {
   RegressionModel,
   ValidationResult,
 } from '../types';
-import { median, ridgeSolve, robustInlierIndices, standardDeviation, standardiseColumns } from './linalg';
+import {
+  correlation,
+  median,
+  ridgeSolve,
+  robustInlierIndices,
+  standardDeviation,
+  standardiseColumns,
+} from './linalg';
 import { viewingGeometry } from './viewingGeometry';
 
-const STORAGE_KEY = 'gazeflow_calibration_v3';
+// v4: the gaze features changed meaning when the two image axes were put in the
+// same unit — vertical shrank by the aspect ratio and translateY with it. A model
+// fitted before that is not merely stale, it is wrong in a way nothing downstream
+// could detect, so old ones are dropped rather than loaded.
+const STORAGE_KEY = 'gazeflow_calibration_v4';
 
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
@@ -115,6 +126,14 @@ const NOMINAL_HEAD_GAIN: HeadGain = { rotation: 1, translation: 1 };
 const MIN_YAW_SPREAD = 0.02;
 const MIN_TRANSLATION_SPREAD = 0.006;
 
+/**
+ * Above this correlation between a rotation axis and its translation partner,
+ * the two cannot be told apart and no attempt is made to. 0.9 leaves room for
+ * the deliberately mixed movement the coverage ring asks for while catching the
+ * near-lockstep of an ordinary head turn.
+ */
+const MAX_SEPARABLE_CORRELATION = 0.9;
+
 
 
 export interface CalibrationPointSpec {
@@ -133,26 +152,35 @@ export const QUICK_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   { id: 5, label: 'bottom right', xPercent: 85, yPercent: 82 },
 ];
 
-/** Standard pass. Nine points is the usual clinical compromise. */
+/**
+ * Standard pass. Nine points is the usual clinical compromise.
+ *
+ * The top row sits at 20% rather than 15% because the instruction line is
+ * centred near the top of the screen, and at 15% the top-middle target landed
+ * directly behind it — the one point on the grid the client could not see. The
+ * bottom row matches at 80% so the grid stays symmetric about the centre; the
+ * cost is about four percent of the calibrated area, against a point that was
+ * being captured from someone hunting for a dot hidden under a sentence.
+ */
 export const DEFAULT_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
-  { id: 1, label: 'top left', xPercent: 12, yPercent: 15 },
-  { id: 2, label: 'top middle', xPercent: 50, yPercent: 15 },
-  { id: 3, label: 'top right', xPercent: 88, yPercent: 15 },
+  { id: 1, label: 'top left', xPercent: 12, yPercent: 20 },
+  { id: 2, label: 'top middle', xPercent: 50, yPercent: 20 },
+  { id: 3, label: 'top right', xPercent: 88, yPercent: 20 },
   { id: 4, label: 'middle left', xPercent: 12, yPercent: 50 },
   { id: 5, label: 'middle', xPercent: 50, yPercent: 50 },
   { id: 6, label: 'middle right', xPercent: 88, yPercent: 50 },
-  { id: 7, label: 'bottom left', xPercent: 12, yPercent: 85 },
-  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 85 },
-  { id: 9, label: 'bottom right', xPercent: 88, yPercent: 85 },
+  { id: 7, label: 'bottom left', xPercent: 12, yPercent: 80 },
+  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 80 },
+  { id: 9, label: 'bottom right', xPercent: 88, yPercent: 80 },
 ];
 
 /** Thirteen points, for when the extra minute is worth the extra precision. */
 export const PRECISION_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   ...DEFAULT_CALIBRATION_TARGETS,
-  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 32 },
-  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 32 },
-  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 68 },
-  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 68 },
+  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 35 },
+  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 35 },
+  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 65 },
+  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 65 },
 ];
 
 /**
@@ -660,15 +688,47 @@ export class CalibrationEngine {
     const translationSpread = Math.max(txSpread, tySpread);
     if (rotationSpread < MIN_YAW_SPREAD && translationSpread < MIN_TRANSLATION_SPREAD) return null;
 
+    /**
+     * Rotation and translation are only separable if the client's head did them
+     * separately, and a neck does not oblige.
+     *
+     * You rotate about your neck, not about your eyeballs, so turning your head
+     * by dθ also slides your eyes sideways by roughly ten centimetres times dθ.
+     * The two regressors therefore arrive almost perfectly correlated, and with
+     * the rotation term carrying about eight times the leverage of the
+     * translation term, least squares can trade a small change in one against a
+     * large change in the other at almost no cost in residual. The split it
+     * returns is then arbitrary — and it is applied to every prediction
+     * afterwards, so an arbitrary split is not a harmless one. A field report
+     * showed exactly this: rotation pushed outside its plausible range and
+     * silently replaced by the fallback, translation left at 0.507, and the
+     * accuracy check afterwards 2.4x worse than the calibration grid it was
+     * fitted on.
+     *
+     * When the two move together, only their combined effect is real. Fitting
+     * the rotation term alone recovers that, attributes it to the term with the
+     * leverage, and leaves translation at the nominal constant — which is a
+     * worse model of a pure sideways slide than a good split would be, and a far
+     * better one than a split invented from collinear data.
+     */
+    const yawTxCorrelation = Math.abs(
+      correlation(usable.map(s => s.headYaw), usable.map(s => s.headTranslateX))
+    );
+    const pitchTyCorrelation = Math.abs(
+      correlation(usable.map(s => s.headPitch), usable.map(s => s.headTranslateY))
+    );
+    const horizontalSeparable = yawTxCorrelation < MAX_SEPARABLE_CORRELATION;
+    const verticalSeparable = pitchTyCorrelation < MAX_SEPARABLE_CORRELATION;
+
     // Horizontal: observed gx = constant - k_rot*yaw - k_trans*tx
     const horizontal = ridgeSolve(
-      usable.map(s => [1, s.headYaw, s.headTranslateX]),
+      usable.map(s => (horizontalSeparable ? [1, s.headYaw, s.headTranslateX] : [1, s.headYaw])),
       usable.map(s => s.gx),
       1e-6
     );
     // Vertical: observed gy = constant + k_rot*pitch - k_trans*ty
     const vertical = ridgeSolve(
-      usable.map(s => [1, s.headPitch, s.headTranslateY]),
+      usable.map(s => (verticalSeparable ? [1, s.headPitch, s.headTranslateY] : [1, s.headPitch])),
       usable.map(s => s.gy),
       1e-6
     );
@@ -679,8 +739,12 @@ export class CalibrationEngine {
 
     if (yawSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: -horizontal[1], weight: yawSpread });
     if (pitchSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: vertical[1], weight: pitchSpread });
-    if (txSpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -horizontal[2], weight: txSpread });
-    if (tySpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -vertical[2], weight: tySpread });
+    if (horizontalSeparable && txSpread >= MIN_TRANSLATION_SPREAD) {
+      translationEstimates.push({ value: -horizontal[2], weight: txSpread });
+    }
+    if (verticalSeparable && tySpread >= MIN_TRANSLATION_SPREAD) {
+      translationEstimates.push({ value: -vertical[2], weight: tySpread });
+    }
 
     const combine = (estimates: Array<{ value: number; weight: number }>, nominal: number) => {
       if (estimates.length === 0) return 1;

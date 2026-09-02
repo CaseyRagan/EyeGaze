@@ -638,16 +638,74 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   );
 
   const gain = engine.fitHeadGainFromMotionPass(ringSamples);
-  // A gain of exactly 1 on an axis is the fallback, not a measurement.
-  const measured = gain !== null && gain.rotation !== 1 && gain.translation !== 1;
-  // Truth is 0.52 rad^-1 against a nominal 0.4, and 0.6 against the nominal
-  // translation constant, so both should land near 1.3.
-  const plausible = measured && gain.rotation > 1.0 && gain.rotation < 1.7;
-  if (!plausible) failures++;
 
+  // Turning and nodding move the head about the neck, so yaw and sideways
+  // travel arrive in lockstep and only their combined effect is identifiable.
+  // The right answer is therefore a single gain carried by the rotation term —
+  // here 1.42, which is the combined truth — and translation left at the
+  // nominal constant rather than at a number invented from collinear data.
+  const combined = gain !== null && gain.rotation > 1.1 && gain.rotation < 1.8 && gain.translation === 1;
+  if (!combined) failures++;
   console.log(
-    `${plausible ? 'ok  ' : 'FAIL'}  filling the ring is enough to measure    ` +
+    `${combined ? 'ok  ' : 'FAIL'}  a turn measures the combined effect      ` +
       (gain ? `rotation ${gain.rotation.toFixed(2)}, translation ${gain.translation.toFixed(2)}` : 'no fit')
+  );
+
+  /**
+   * And the separable case, which is what a second movement buys.
+   *
+   * Sliding the head while keeping it square on to the screen produces travel
+   * without rotation. Played back alongside the turn, the two regressors no
+   * longer march together, and both constants come back — which is the argument
+   * for asking the client for two movements rather than one.
+   */
+  reseed();
+  const engineTwo = new CalibrationEngine();
+  engineTwo.reset();
+  GRIDS['9-point'].forEach(([x, y], i) => engineTwo.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, 0.002)));
+
+  const slideSamples = Array.from({ length: 120 }, (_, i) => {
+    const t = i / 120;
+    const horizontal = t < 0.5;
+    const phase = (horizontal ? t * 2 : (t - 0.5) * 2) * Math.PI * 2;
+    // Square on throughout: travel with no rotation at all.
+    const posture: Posture = {
+      yaw: 0,
+      pitch: 0,
+      translateX: horizontal ? 0.035 * Math.sin(phase) : 0,
+      translateY: horizontal ? 0 : 0.02 * Math.sin(phase),
+    };
+    const jittered: Posture = {
+      yaw: posture.yaw + gaussian(0.004),
+      pitch: posture.pitch + gaussian(0.004),
+      translateX: posture.translateX + gaussian(0.002),
+      translateY: posture.translateY + gaussian(0.002),
+    };
+    const eyes = perEyeFeatures(0.5, 0.5, jittered, 0.0016);
+    return {
+      gx: eyes.gx,
+      gy: eyes.gy,
+      headYaw: jittered.yaw,
+      headPitch: jittered.pitch,
+      headTranslateX: jittered.translateX,
+      headTranslateY: jittered.translateY,
+      quality: 0.9,
+    };
+  });
+
+  const bothGain = engineTwo.fitHeadGainFromMotionPass([...ringSamples, ...slideSamples]);
+  // Truth is 0.6 against a nominal 0.462, so translation should land near 1.3.
+  const separated =
+    bothGain !== null &&
+    bothGain.translation !== 1 &&
+    bothGain.translation > 1.0 &&
+    bothGain.translation < 1.7;
+  if (!separated) failures++;
+  console.log(
+    `${separated ? 'ok  ' : 'FAIL'}  adding a slide separates the two         ` +
+      (bothGain
+        ? `rotation ${bothGain.rotation.toFixed(2)}, translation ${bothGain.translation.toFixed(2)}`
+        : 'no fit')
   );
 }
 

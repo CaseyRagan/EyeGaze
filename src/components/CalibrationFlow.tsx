@@ -1046,7 +1046,21 @@ const CaptureStage: React.FC<{
       {/* Few enough words to register peripherally. Anything that genuinely
           needed reading was said on the briefing card, before the eyes were
           committed to the dot. */}
-      <p className="absolute top-8 left-1/2 -translate-x-1/2 text-lg font-medium text-ink-soft text-center">
+      {/*
+        The instruction moves to whichever end of the screen the dot is not at.
+
+        Nudging the grid inwards clears today's collision at today's window size,
+        which is not the same as fixing it: the text is centred and the top row
+        is centred, so on a shorter window they meet again. Putting the line
+        opposite the target keeps them apart at any size, and has the better
+        property of never asking the client to read something sitting a couple of
+        degrees from the point they are being told to fixate.
+      */}
+      <p
+        className={`absolute left-1/2 -translate-x-1/2 text-lg font-medium text-ink-soft text-center transition-all duration-200 ${
+          position.yNorm < 0.45 ? 'bottom-16' : 'top-8'
+        }`}
+      >
         {confirmMode
           ? nudge
             ? 'Hold still a moment longer, then press space'
