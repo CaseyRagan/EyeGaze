@@ -425,5 +425,75 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   );
 }
 
+/**
+ * Leaning in or out after calibrating.
+ *
+ * A screen point X cm off centre needs an eye rotation of atan(X / D), so the
+ * whole mapping scales with viewing distance. Calibrate at 50 cm, lean in to
+ * 40 cm, and every estimate flies outward unless the mapping shrinks to match.
+ * This is an ordinary thing for someone to do during a session — leaning in to
+ * see something is close to a reflex — so it has to be handled rather than only
+ * warned about.
+ */
+{
+  reseed();
+  const engine = new CalibrationEngine();
+  engine.reset();
+
+  const CAL_SPAN = 0.1;
+  GRIDS['13-point'].forEach(([x, y], i) => {
+    engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, 0.0016, 30, STILL));
+  });
+  engine.recordPosture({
+    yaw: 0, pitch: 0, roll: 0,
+    translateX: 0, translateY: 0,
+    distanceCm: 50, distanceAgreement: 1, interocularSpan: CAL_SPAN,
+  });
+
+  // Leaning in from 50 cm to 40 cm makes the eyes look 50/40 further apart.
+  const leanRatio = 50 / 40;
+
+  const measure = (spanNow: number, distanceNow: number) => {
+    let sum = 0;
+    for (const [x, y] of TEST_POINTS) {
+      // At the new distance the same screen point sits at a different angle, so
+      // the eye measurement for it is the one that used to point somewhere
+      // proportionally further out.
+      const scaled = {
+        x: 0.5 + (x - 0.5) * (50 / distanceNow),
+        y: 0.5 + (y - 0.5) * (50 / distanceNow),
+      };
+      const eyes = perEyeFeatures(scaled.x, scaled.y, STILL, 0);
+      const mapped = engine.mapToScreen(
+        eyes.gx,
+        eyes.gy,
+        {
+          yaw: 0, pitch: 0, roll: 0,
+          translateX: 0, translateY: 0,
+          distanceCm: distanceNow, distanceAgreement: 1, interocularSpan: spanNow,
+        },
+        WIDTH,
+        HEIGHT
+      )!;
+      sum += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
+    }
+    return viewingGeometry.pixelsToDegrees(sum / TEST_POINTS.length);
+  };
+
+  const atCalibratedDistance = measure(CAL_SPAN, 50);
+  const afterLeaningIn = measure(CAL_SPAN * leanRatio, 40);
+
+  const stillGoodWhereCalibrated = atCalibratedDistance <= 0.7;
+  const leanHandled = afterLeaningIn <= 1.2;
+  if (!stillGoodWhereCalibrated || !leanHandled) failures++;
+
+  console.log(
+    `${stillGoodWhereCalibrated ? 'ok  ' : 'FAIL'}  at the calibrated distance               ${atCalibratedDistance.toFixed(2)}°`
+  );
+  console.log(
+    `${leanHandled ? 'ok  ' : 'FAIL'}  after leaning in 50cm -> 40cm            ${afterLeaningIn.toFixed(2)}°`
+  );
+}
+
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

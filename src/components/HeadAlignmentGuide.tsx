@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Crosshair, Move } from 'lucide-react';
-import { GazeState, PostureDrift } from '../types';
+import { GazeState } from '../types';
 import { calibrationEngine } from '../services/calibration';
 import { gazeBus } from '../services/gazeBus';
+import { drawHeadPosition, judgeAlignment } from './headPositionDraw';
 
 interface HeadAlignmentGuideProps {
   onRecentre?: () => void;
@@ -23,14 +24,13 @@ interface HeadAlignmentGuideProps {
 
 const BOX_WIDTH = 168;
 const BOX_HEIGHT = 126;
-/** Image-space offsets are scaled by this to fill a useful part of the box. */
-const POSITION_GAIN = 260;
 
 export const HeadAlignmentGuide: React.FC<HeadAlignmentGuideProps> = ({ onRecentre }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const gazeRef = useRef<GazeState | null>(gazeBus.get());
   const [collapsed, setCollapsed] = useState(false);
-  const [severity, setSeverity] = useState<PostureDrift['severity'] | 'unknown'>('unknown');
+  const [aligned, setAligned] = useState(false);
+  const [instruction, setInstruction] = useState<string | null>(null);
   const [distanceCm, setDistanceCm] = useState<number | null>(null);
 
   useEffect(() => gazeBus.subscribe(g => {
@@ -56,77 +56,56 @@ export const HeadAlignmentGuide: React.FC<HeadAlignmentGuideProps> = ({ onRecent
       const gaze = gazeRef.current;
       const posture = calibrationEngine.getPosture();
 
-      ctx.clearRect(0, 0, BOX_WIDTH, BOX_HEIGHT);
-
-      const style = getComputedStyle(document.documentElement);
-      const ink = style.getPropertyValue('--color-ink-faint').trim() || '#8b938f';
-      const sage = style.getPropertyValue('--color-sage-500').trim() || '#4e8779';
-      const clay = style.getPropertyValue('--color-clay-400').trim() || '#cc8f6e';
-
-      const drift = gaze ? calibrationEngine.getPostureDrift(gaze.headPose) : null;
-
-      // Target outline: where the head sat when the mapping was learned.
-      const targetX = BOX_WIDTH / 2 + (posture ? posture.translateX * POSITION_GAIN : 0);
-      const targetY = BOX_HEIGHT / 2 + (posture ? posture.translateY * POSITION_GAIN : 0);
-
-      ctx.setLineDash([4, 4]);
-      ctx.strokeStyle = ink;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.ellipse(targetX, targetY, 30, 38, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
       if (!gaze || gaze.event === 'lost' || !posture) {
-        ctx.fillStyle = ink;
-        ctx.font = '11px system-ui, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(posture ? 'Face not found' : 'Not set up yet', BOX_WIDTH / 2, BOX_HEIGHT - 8);
+        drawHeadPosition(ctx, {
+          width: BOX_WIDTH,
+          height: BOX_HEIGHT,
+          scale: 1,
+          translateX: 0,
+          translateY: 0,
+          yaw: 0,
+          pitch: 0,
+          roll: 0,
+          aligned: false,
+          state: posture ? 'no-face' : 'no-target',
+          emptyLabel: posture ? 'Face not found' : 'Not set up yet',
+        });
         frame = requestAnimationFrame(render);
         return;
       }
 
-      // Live head, sized by distance so moving closer or further is visible as
-      // the marker growing or shrinking against the fixed target outline.
-      const spanRatio =
+      // Apparent eye separation against the calibrated pose gives relative
+      // distance directly, so the outline grows when the client leans in — the
+      // drift that costs the most and is hardest to feel.
+      const scale =
         posture.interocularSpan > 1e-5 ? gaze.headPose.interocularSpan / posture.interocularSpan : 1;
-      const scale = Math.max(0.55, Math.min(1.6, spanRatio));
 
-      const liveX = BOX_WIDTH / 2 + gaze.headPose.translateX * POSITION_GAIN;
-      const liveY = BOX_HEIGHT / 2 + gaze.headPose.translateY * POSITION_GAIN;
+      const verdict = judgeAlignment({
+        scale,
+        translateX: gaze.headPose.translateX,
+        translateY: gaze.headPose.translateY,
+        targetTranslateX: posture.translateX,
+        targetTranslateY: posture.translateY,
+        yaw: gaze.headPose.yaw - posture.yaw,
+        pitch: gaze.headPose.pitch - posture.pitch,
+      });
 
-      const aligned = drift?.severity === 'good';
-      const colour = aligned ? sage : clay;
+      drawHeadPosition(ctx, {
+        width: BOX_WIDTH,
+        height: BOX_HEIGHT,
+        scale: Math.max(0.35, Math.min(2.2, scale)),
+        translateX: gaze.headPose.translateX - posture.translateX,
+        translateY: gaze.headPose.translateY - posture.translateY,
+        yaw: gaze.headPose.yaw,
+        pitch: gaze.headPose.pitch,
+        roll: gaze.headPose.roll,
+        aligned: verdict.aligned,
+        state: 'tracking',
+      });
 
-      ctx.save();
-      ctx.translate(liveX, liveY);
-      ctx.rotate(gaze.headPose.roll);
-      ctx.beginPath();
-      ctx.ellipse(0, 0, 30 * scale, 38 * scale, 0, 0, Math.PI * 2);
-      ctx.fillStyle = colour;
-      ctx.globalAlpha = 0.18;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = colour;
-      ctx.stroke();
-
-      // Eye marks, so the picture reads as a face and the direction it is
-      // turned is obvious at a glance rather than needing to be read off a
-      // number. They slide within the outline as the head rotates.
-      const yawShift = -gaze.headPose.yaw * 22;
-      const pitchShift = gaze.headPose.pitch * 16;
-      ctx.fillStyle = colour;
-      for (const side of [-1, 1]) {
-        ctx.beginPath();
-        ctx.arc(side * 11 * scale + yawShift, -6 * scale + pitchShift, 2.6, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
-
-      uiTick++;
-      if (uiTick % 15 === 0) {
-        setSeverity(drift?.severity ?? 'unknown');
+      if (++uiTick % 15 === 0) {
+        setInstruction(verdict.instruction);
+        setAligned(verdict.aligned);
         setDistanceCm(gaze.headPose.distanceCm);
       }
 
@@ -137,14 +116,13 @@ export const HeadAlignmentGuide: React.FC<HeadAlignmentGuideProps> = ({ onRecent
     return () => cancelAnimationFrame(frame);
   }, [collapsed]);
 
-  const tone =
-    severity === 'good'
-      ? { text: 'text-sage-700', label: 'Lined up', Icon: Check }
-      : severity === 'drifting'
-      ? { text: 'text-honey-700', label: 'Drifting', Icon: Move }
-      : severity === 'recalibrate'
-      ? { text: 'text-clay-500', label: 'Moved a long way', Icon: Move }
-      : { text: 'text-ink-faint', label: 'Head position', Icon: Crosshair };
+  // The label says what to do, not merely that something is wrong. "Drifting"
+  // tells someone they have a problem and nothing about how to fix it.
+  const tone = aligned
+    ? { text: 'text-sage-700', label: 'Lined up', Icon: Check }
+    : instruction
+    ? { text: 'text-clay-500', label: instruction, Icon: Move }
+    : { text: 'text-ink-faint', label: 'Head position', Icon: Crosshair };
 
   if (collapsed) {
     return (
@@ -185,7 +163,7 @@ export const HeadAlignmentGuide: React.FC<HeadAlignmentGuideProps> = ({ onRecent
         <span className="text-[11px] text-ink-faint">
           {distanceCm !== null ? `${distanceCm.toFixed(0)} cm away` : 'Distance unknown'}
         </span>
-        {severity !== 'good' && onRecentre && (
+        {!aligned && onRecentre && (
           <button
             onClick={onRecentre}
             className="text-[11px] font-medium text-sage-600 hover:text-sage-700 underline underline-offset-2"

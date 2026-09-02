@@ -799,10 +799,29 @@ export class CalibrationEngine {
       headPose.translateY
     );
 
+    // Depth compensation.
+    //
+    // A screen point sitting X cm to the side of straight ahead demands an eye
+    // rotation of atan(X / D). Move nearer and the same rotation now points at
+    // a *closer* spot, so the whole mapping has to shrink toward the centre by
+    // the ratio of the distances — and stretch when the client leans back.
+    //
+    // This was previously measured, reported as "drifting", and then not acted
+    // on, which is a poor combination: leaning in by 10 cm from a 50 cm
+    // calibration throws the estimate outward by a fifth of the way to the
+    // screen edge, and the client is told they have moved without being told
+    // what it costs or having it corrected.
+    //
+    // The ratio comes from apparent eye separation rather than the absolute
+    // distance estimate. Distance in centimetres depends on assumed camera
+    // optics and can be wrong by a large factor; the *ratio* of two eye
+    // separations is a direct measurement that cancels all of that.
+    const depthScale = this.getDepthScale(headPose);
+
     // Sensitivity is a gain about the screen centre, offered as a comfort
     // adjustment for users who cannot comfortably reach the screen edges.
-    let nx = 0.5 + (p.x - 0.5) * sensitivityX + this.model.nudgeXNorm;
-    let ny = 0.5 + (p.y - 0.5) * sensitivityY + this.model.nudgeYNorm;
+    let nx = 0.5 + (p.x - 0.5) * sensitivityX * depthScale + this.model.nudgeXNorm;
+    let ny = 0.5 + (p.y - 0.5) * sensitivityY * depthScale + this.model.nudgeYNorm;
 
     // Clamp generously rather than exactly at the edge, so a user looking just
     // past the screen still produces a stable edge reading.
@@ -810,6 +829,23 @@ export class CalibrationEngine {
     ny = Math.max(-0.05, Math.min(1.05, ny));
 
     return { x: nx * screenWidth, y: ny * screenHeight };
+  }
+
+  /**
+   * How much to shrink or stretch the mapping for a change in viewing distance
+   * since calibration. 1 means the client is where they calibrated.
+   *
+   * Clamped hard: beyond this range the measurement is more likely to be a
+   * tracking failure than a person who has genuinely moved that far, and a
+   * runaway scale factor would be worse than no correction at all.
+   */
+  private getDepthScale(headPose: HeadPose): number {
+    const posture = this.model.posture;
+    if (!posture || posture.interocularSpan < 1e-5 || headPose.interocularSpan < 1e-5) return 1;
+
+    const scale = posture.interocularSpan / headPose.interocularSpan;
+    if (!Number.isFinite(scale)) return 1;
+    return Math.max(0.65, Math.min(1.5, scale));
   }
 
   /**

@@ -36,17 +36,25 @@ the constant part of the residual error in about two seconds.
 
 ### 2. Distance changes
 
-Moving nearer or further changes the angular size of the screen, so a mapping
-learned at one distance over- or under-shoots at another.
+A screen point sitting X cm off centre demands an eye rotation of atan(X / D),
+so the whole mapping scales with viewing distance. Calibrate at 50 cm, lean in
+to 40 cm, and every estimate flies outward by a quarter unless the mapping
+shrinks to match — a fifth of the way to the screen edge at the extremes.
 
-The eye *measurement* itself is already distance-invariant: every feature is a
-ratio of two lengths measured on the same eye (iris offset over eye width), so
-it does not change when the face gets bigger or smaller in frame. What changes
-is the geometry between the eye and the screen. Error grows roughly in
-proportion to the fractional change in distance.
+The eye *measurement* is already distance-invariant: every feature is a ratio of
+two lengths on the same eye, so it does not change when the face gets bigger in
+frame. What changes is the geometry between the eye and the screen.
 
-A frame fixes distance as a side effect of fixing translation. Without one, the
-posture monitor reports depth drift and prompts a re-centre.
+`getDepthScale` handles it, using the ratio of apparent eye separation now to
+what it was at calibration. That ratio is a direct measurement and cancels the
+assumed camera optics that make the absolute distance figure unreliable. On
+synthetic data, a 50 to 40 cm lean costs 1.29 degrees uncorrected and 0.49 with
+the correction.
+
+This was measured and reported as "drifting" for a while before it was acted on,
+which is a poor combination: the client is told they have moved without being
+told what it costs, and without the estimate being fixed. Leaning in to look at
+something is close to a reflex, so it has to be handled rather than warned about.
 
 ### 3. Head rotation
 
@@ -278,6 +286,24 @@ Leave-one-out error identifies such a point cleanly, and `pruneOutlierAnchors`
 drops at most two of them. On synthetic data with one point captured while the
 client looked at the opposite corner, this takes the result from 2.06 to 0.85
 degrees; on a clean grid it removes nothing.
+
+## Showing someone where to sit
+
+The head-position picture scales with distance: the outline grows as you come
+closer and shrinks as you lean back, sitting exactly on the dashed target when
+you are where you should be.
+
+That sounds cosmetic and is not. Depth is the drift people are least able to
+feel and, per the section above, one of the more expensive. An outline that only
+slides around conveys nothing about it, so a client could be 10 cm out of
+position, be told they were "drifting", and have no way to work out what to
+change. Being told there is a problem without being shown which way to move is
+not feedback.
+
+For the same reason the in-session guide's label is an instruction — "Move back
+a little", "Shift a little to your left" — rather than a status. One correction
+at a time, depth first, because a list of three simultaneous adjustments is not
+something anyone can act on.
 
 ## The working area
 
