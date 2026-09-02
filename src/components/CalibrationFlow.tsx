@@ -24,6 +24,16 @@ import { DistanceCheck } from './DistanceCheck';
 import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
 import { cancelSpeech, speakPrompt } from '../services/speech';
+import {
+  DIRECTION_PROMPT,
+  EMPTY_COVERAGE,
+  HeadCoverage,
+  HeadCoverageRing,
+  accumulateCoverage,
+  coverageComplete,
+  coverageFraction,
+  nextDirection,
+} from './HeadCoverageRing';
 
 type Stage = 'position' | 'brief' | 'capture' | 'head_pass' | 'validate' | 'result';
 
@@ -40,6 +50,9 @@ type Stage = 'position' | 'brief' | 'capture' | 'head_pass' | 'validate' | 'resu
  */
 type BriefFor = 'capture' | 'head_pass' | 'validate';
 
+/** The same phases again, worded for the mode where the client confirms each point. */
+type BriefingKey = BriefFor | 'capture_confirmed' | 'validate_confirmed';
+
 interface Briefing {
   title: string;
   body: string;
@@ -48,17 +61,29 @@ interface Briefing {
   action: string;
 }
 
-const BRIEFINGS: Record<BriefFor, Briefing> = {
+const BRIEFINGS: Record<BriefingKey, Briefing> = {
   capture: {
     title: 'Look at each dot and hold still',
     body: 'Dots will appear one at a time. Look at the middle of each one and keep still — it fills in on its own, so there is nothing to press. If you look away it pauses and waits for you.',
     spoken: 'Look at each dot and hold still until it fills.',
     action: 'Start',
   },
+  capture_confirmed: {
+    title: 'Look at each dot, then press the space bar',
+    body: 'Dots appear one at a time. Look right at the middle of one, hold still until the ring closes, then press the space bar — the tracker records the moment just before you press. Nothing is recorded until you say so, so take as long as you like on each one.',
+    spoken: 'Look at the dot, hold still, then press the space bar.',
+    action: 'Start',
+  },
+  validate_confirmed: {
+    title: 'Last part — checking the result',
+    body: 'A few more dots, the same as before: look, hold still, press space. These ones are not teaching the tracker anything; they are measuring how well it learned, so the accuracy figure at the end means something.',
+    spoken: 'A few more dots to check the result. Same as before.',
+    action: 'Start the check',
+  },
   head_pass: {
     title: 'Now keep your eyes on the dot and move your head',
-    body: 'One dot, about six seconds. Keep looking straight at it the whole time while you slowly turn your head left and right, then nod gently up and down. Moving your head is the point — your eyes stay on the dot.',
-    spoken: 'Keep your eyes on the dot. Slowly turn your head side to side, then nod.',
+    body: 'A ring of four arcs will appear around the dot. Keep looking straight at the dot the whole time, and slowly turn your head left, then right, then tip your chin up and down — each arc fills as you reach far enough that way. When the ring is full, this part is done. Moving your head is the point; your eyes stay on the dot.',
+    spoken: 'Keep your eyes on the dot, and move your head until the ring around it fills.',
     action: 'I understand',
   },
   validate: {
@@ -113,9 +138,78 @@ const COLLECT_TIMEOUT_MS = 3200;
 const MIN_SETTLED_SAMPLES = 8;
 /** Two samples further apart than this did not arrive back to back. */
 const CONSECUTIVE_SAMPLE_MS = 60;
-/** Length of the head-movement pass. Long enough to cover a full sweep twice. */
+/**
+ * Confirmed capture: the client says when they are on the dot.
+ *
+ * Waiting for the eye to settle is a good proxy for "looking at the target",
+ * but it is only a proxy, and it fails in exactly the way that matters: someone
+ * holding a steady gaze on the therapist, on their own reflection, or on a dot
+ * they have already left is perfectly settled. The dot then fills, and a point
+ * that describes somewhere else entirely goes into the fit — where least
+ * squares spreads it across the whole screen. Testers reported precisely this:
+ * "the targets filled on their own regardless of where I was looking."
+ *
+ * A key press removes the proxy. Only the person looking knows whether they are
+ * on the target, so they are the ones who say so.
+ *
+ * The samples are taken from *before* the press, not after it. Deciding to
+ * press, and pressing, both take time in which the eye can begin to leave — and
+ * the tail of the window is where anticipation of the next dot shows up. So the
+ * window closes a little before the key goes down and reaches back from there,
+ * covering the moment the client was actually reporting on rather than the
+ * moment they reported it.
+ */
+const CONFIRM_LOOKBACK_MS = 900;
+/** Discarded from the end of that window: the press itself and the run-up to it. */
+const CONFIRM_EXCLUDE_MS = 130;
+/** Fewest settled samples inside the window for a confirmation to be accepted. */
+const CONFIRM_MIN_SAMPLES = 8;
+/** Presses this soon after a dot appears are the previous screen's key repeating. */
+const CONFIRM_ARM_MS = 300;
+/**
+ * How long to wait for the eye to visibly leave the last dot before banking
+ * samples anyway.
+ *
+ * When a new dot appears the eye is still on the old one, and it is still
+ * *settled* — so without this, a dot is "ready to confirm" the instant it
+ * appears, from samples describing the previous target. An eager client
+ * pressing straight away would record the last dot's position against this
+ * dot's coordinates, which is worse than any noise the mode was built to
+ * remove. So nothing is banked until a saccade says the eye has moved.
+ *
+ * The timeout is the escape hatch for a gaze that never crosses the saccade
+ * threshold — poor tracking, or two dots close enough together that the
+ * movement between them is small. Waiting forever would leave the client
+ * pressing a key that does nothing.
+ */
+const ARRIVAL_GRACE_MS = 2000;
+
+/**
+ * The head-movement pass ends when the movement is done, not when a clock runs out.
+ *
+ * It used to run for a fixed six seconds. That measured whatever the client
+ * happened to do in six seconds, which for anyone taking the instruction
+ * cautiously was not enough movement to fit anything — and the pass reported
+ * success regardless, because a fit that finds nothing falls back to the
+ * textbook constants rather than failing loudly. Testers said as much: the
+ * instruction was clear, but "still slightly unclear how much side to side and
+ * nodding I should do."
+ *
+ * Now the requirement is shown as a ring of four arcs and the pass ends when
+ * they are full, so the amount is visible and finishing is unambiguous.
+ */
 const HEAD_PASS_SETTLE_MS = 900;
-const HEAD_PASS_COLLECT_MS = 6000;
+/** Floor, so the ring cannot be filled and gone before it has been understood. */
+const HEAD_PASS_MIN_MS = 2500;
+/** Ceiling, so a client who cannot complete the ring is never trapped by it. */
+const HEAD_PASS_MAX_MS = 20000;
+
+function briefingKey(phase: BriefFor, confirmMode: boolean): BriefingKey {
+  if (!confirmMode) return phase;
+  if (phase === 'capture') return 'capture_confirmed';
+  if (phase === 'validate') return 'validate_confirmed';
+  return phase;
+}
 
 /**
  * Where a target actually lands, as a fraction of the viewport.
@@ -174,6 +268,27 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const [prunedPoints, setPrunedPoints] = useState<string[]>([]);
   const [briefFor, setBriefFor] = useState<BriefFor>('capture');
   const [headPassOutcome, setHeadPassOutcome] = useState<'pending' | 'measured' | 'skipped' | 'failed'>('pending');
+  /**
+   * Whether the client confirms each point themselves.
+   *
+   * Held here rather than read straight from settings so it can be turned off
+   * for one session — for a client who cannot reliably press a key — without
+   * changing the clinic's default.
+   */
+  const [confirmMode, setConfirmMode] = useState(settings.confirmCalibrationPoints);
+  /** Set once enough settled samples are in the confirmation window. */
+  const [readyToConfirm, setReadyToConfirm] = useState(false);
+  /** Whether the eye has been seen to leave the previous dot; see ARRIVAL_GRACE_MS. */
+  const arrivedRef = useRef(false);
+  const [headCoverage, setHeadCoverage] = useState<HeadCoverage>(EMPTY_COVERAGE);
+  const [headMarker, setHeadMarker] = useState({ x: 0, y: 0 });
+  /** The pose the pass started from; every excursion is measured against it. */
+  const headReferenceRef = useRef<{ yaw: number; pitch: number } | null>(null);
+  const headCoverageRef = useRef<HeadCoverage>(EMPTY_COVERAGE);
+  /** How full the ring got, so the result can say which half of the step fell short. */
+  const [headPassCoverage, setHeadPassCoverage] = useState(0);
+  /** Shown when a press arrives before the eye has held still long enough. */
+  const [confirmNudge, setConfirmNudge] = useState(false);
 
   const samplesRef = useRef<CalibrationSample[]>([]);
   /**
@@ -215,6 +330,29 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     liveGazeRef.current = g;
   }), []);
 
+  useEffect(() => setConfirmMode(settings.confirmCalibrationPoints), [settings.confirmCalibrationPoints]);
+
+  /**
+   * Settled samples whose timestamps fall inside a window, with the mapped
+   * points that go with them.
+   *
+   * The two arrays are appended in lockstep by the sample sink, so an index
+   * into one is the same moment in the other.
+   */
+  const settledWithin = useCallback((from: number, to: number) => {
+    const points = settledPointsRef.current;
+    const samples = settledSamplesRef.current;
+    const outSamples: CalibrationSample[] = [];
+    const outPoints: Array<{ x: number; y: number; t: number }> = [];
+    for (let i = 0; i < points.length && i < samples.length; i++) {
+      if (points[i].t >= from && points[i].t <= to) {
+        outSamples.push(samples[i]);
+        outPoints.push(points[i]);
+      }
+    }
+    return { samples: outSamples, points: outPoints };
+  }, []);
+
   // ---------------------------------------------------------------- capture
   /** Shows the card for a phase, then runs that phase when the user is ready. */
   const brief = useCallback((phase: BriefFor) => {
@@ -224,15 +362,21 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
   const beginPoint = useCallback((index: number) => {
     setTargetIndex(index);
-    setPhase('settle');
+    // Confirmed capture has nothing to wait for: the buffer starts filling
+    // immediately so there is already a window to reach back into by the time
+    // the client is ready to press.
+    setPhase(confirmMode ? 'collect' : 'settle');
     setProgress(0);
+    setReadyToConfirm(false);
+    setConfirmNudge(false);
+    arrivedRef.current = false;
     samplesRef.current = [];
     settledSamplesRef.current = [];
     settledPointsRef.current = [];
     gazePointsRef.current = [];
     phaseStartRef.current = performance.now();
     soundEngine.playChime(560, 0.1);
-  }, []);
+  }, [confirmMode]);
 
   const startValidationPhase = useCallback(() => {
     validationResultsRef.current = [];
@@ -243,9 +387,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   }, [beginPoint]);
 
   const finishCapturePoint = useCallback(
-    (spec: CalibrationPointSpec) => {
+    (spec: CalibrationPointSpec, confirmed?: CalibrationSample[]) => {
       const settled = settledSamplesRef.current;
-      const chosen = settled.length >= MIN_SETTLED_SAMPLES ? settled : samplesRef.current;
+      const chosen =
+        confirmed ?? (settled.length >= MIN_SETTLED_SAMPLES ? settled : samplesRef.current);
 
       const { xNorm, yNorm } = targetViewportNorm(spec);
       const anchor = calibrationEngine.addAnchorFromSamples(
@@ -266,13 +411,17 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     []
   );
 
-  const finishValidatePoint = useCallback((spec: CalibrationPointSpec) => {
+  const finishValidatePoint = useCallback((
+    spec: CalibrationPointSpec,
+    confirmed?: Array<{ x: number; y: number; t: number }>
+  ) => {
     // Measure accuracy from settled samples only. Including the approach to the
     // dot would report the journey rather than the destination.
     const points =
-      settledPointsRef.current.length >= MIN_SETTLED_SAMPLES
+      confirmed ??
+      (settledPointsRef.current.length >= MIN_SETTLED_SAMPLES
         ? settledPointsRef.current
-        : gazePointsRef.current;
+        : gazePointsRef.current);
     const scrW = window.innerWidth;
     const scrH = window.innerHeight;
     const { xNorm, yNorm } = targetViewportNorm(spec);
@@ -382,6 +531,16 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       framesSeenRef.current++;
       if (!usable) return;
       framesUsedRef.current++;
+
+      // Nothing counts until the eye has actually travelled to this dot. The
+      // grace period only applies to a gaze that never registers the move.
+      if (confirmMode && !arrivedRef.current) {
+        if (gaze.event === 'saccade' || performance.now() - phaseStartRef.current > ARRIVAL_GRACE_MS) {
+          arrivedRef.current = true;
+        }
+        return;
+      }
+
       samplesRef.current.push(sample);
       if (gaze.isFixating) {
         settledSamplesRef.current.push(sample);
@@ -391,7 +550,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     });
 
     return () => tracker.collectSamples(null);
-  }, [isOpen, tracker, stage, phase]);
+  }, [isOpen, tracker, stage, phase, confirmMode]);
 
   // Timing loop for the head-movement pass.
   useEffect(() => {
@@ -400,17 +559,51 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     let frame = 0;
     const tick = () => {
       const elapsed = performance.now() - phaseStartRef.current;
+      const pose = liveGazeRef.current?.headPose;
 
       if (elapsed < HEAD_PASS_SETTLE_MS) {
         setProgress(elapsed / HEAD_PASS_SETTLE_MS);
         if (phase !== 'settle') setPhase('settle');
-      } else if (elapsed < HEAD_PASS_SETTLE_MS + HEAD_PASS_COLLECT_MS) {
-        if (phase !== 'collect') setPhase('collect');
-        setProgress((elapsed - HEAD_PASS_SETTLE_MS) / HEAD_PASS_COLLECT_MS);
-      } else {
+        // The settling second is also what defines "centre": excursions are
+        // measured from wherever the client is actually sitting, not from a
+        // nominal pose they may never have been in.
+        if (pose) headReferenceRef.current = { yaw: pose.yaw, pitch: pose.pitch };
+        frame = requestAnimationFrame(tick);
+        return;
+      }
+
+      if (phase !== 'collect') setPhase('collect');
+
+      const reference = headReferenceRef.current;
+      if (pose && reference) {
+        const next = accumulateCoverage(
+          headCoverageRef.current,
+          pose.yaw,
+          pose.pitch,
+          reference.yaw,
+          reference.pitch
+        );
+        headCoverageRef.current = next.coverage;
+        setHeadCoverage(next.coverage);
+        setHeadMarker({ x: next.markerX, y: next.markerY });
+        setProgress(coverageFraction(next.coverage));
+      }
+
+      const moving = elapsed - HEAD_PASS_SETTLE_MS;
+      const done =
+        (coverageComplete(headCoverageRef.current) && moving >= HEAD_PASS_MIN_MS) ||
+        moving >= HEAD_PASS_MAX_MS;
+
+      if (done) {
         const gain = calibrationEngine.fitHeadGainFromMotionPass(samplesRef.current);
-        setHeadPassOutcome(gain ? 'measured' : 'failed');
-        soundEngine.playChime(gain ? 640 : 380, 0.15);
+        // A gain of exactly one on both axes is what the fit falls back to when
+        // it cannot trust what it measured. Reporting that as "measured"
+        // because a non-null object came back is how this step used to claim
+        // success while having learned nothing.
+        const measured = gain !== null && (gain.rotation !== 1 || gain.translation !== 1);
+        setHeadPassCoverage(coverageFraction(headCoverageRef.current));
+        setHeadPassOutcome(measured ? 'measured' : 'failed');
+        soundEngine.playChime(measured ? 640 : 380, 0.15);
         brief('validate');
         return;
       }
@@ -422,46 +615,124 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     return () => cancelAnimationFrame(frame);
   }, [isOpen, stage, phase, brief]);
 
+  /**
+   * Records the current point and moves on.
+   *
+   * Hoisted out of the timing loop because there are now two things that can
+   * end a point — the sample count filling in hands-free mode, and the client's
+   * key press in confirmed mode — and both have to finish it the same way.
+   */
+  const advance = useCallback((confirmedAt?: number) => {
+    if (!currentTarget) return;
+
+    const windowEnd = confirmedAt === undefined ? 0 : confirmedAt - CONFIRM_EXCLUDE_MS;
+    const captured =
+      confirmedAt === undefined
+        ? undefined
+        : settledWithin(windowEnd - CONFIRM_LOOKBACK_MS, windowEnd);
+
+    if (stage === 'capture') finishCapturePoint(currentTarget, captured?.samples);
+    else finishValidatePoint(currentTarget, captured?.points);
+
+    const next = targetIndex + 1;
+    if (next < targets.length) {
+      beginPoint(next);
+      return;
+    }
+
+    if (stage === 'capture') {
+      // Drop any point the rest of the grid clearly disagrees with, before it
+      // can distort the head-movement fit and the accuracy check after it.
+      setPrunedPoints(calibrationEngine.pruneOutlierAnchors().removed);
+
+      // The posture held during calibration is what the mapping is tied to,
+      // so it becomes the reference for later drift warnings.
+      const posture = liveGazeRef.current?.headPose;
+      if (posture) calibrationEngine.recordPosture(posture);
+
+      if (wantHeadPass) {
+        brief('head_pass');
+      } else {
+        setHeadPassOutcome('skipped');
+        brief('validate');
+      }
+    } else {
+      completeValidation();
+    }
+  }, [
+    stage,
+    currentTarget,
+    targetIndex,
+    targets.length,
+    wantHeadPass,
+    settledWithin,
+    finishCapturePoint,
+    finishValidatePoint,
+    completeValidation,
+    beginPoint,
+    brief,
+  ]);
+
+  /**
+   * The client's confirmation that they are on the dot.
+   *
+   * A press with too little settled data behind it is refused rather than
+   * recorded: it means the eye had not held still through the window being
+   * asked for, and taking it anyway would put back exactly the unverified point
+   * this mode exists to prevent. The refusal is visible, so nobody is left
+   * pressing at a dot that will not take.
+   */
+  const confirmPoint = useCallback(() => {
+    const now = Date.now();
+    if (performance.now() - phaseStartRef.current < CONFIRM_ARM_MS) return;
+
+    const end = now - CONFIRM_EXCLUDE_MS;
+    const { samples } = settledWithin(end - CONFIRM_LOOKBACK_MS, end);
+    if (samples.length < CONFIRM_MIN_SAMPLES) {
+      setConfirmNudge(true);
+      soundEngine.playChime(300, 0.1);
+      return;
+    }
+    advance(now);
+  }, [advance, settledWithin]);
+
+  useEffect(() => {
+    if (!isOpen || !confirmMode) return;
+    if (stage !== 'capture' && stage !== 'validate') return;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      if (e.code !== 'Space' && e.code !== 'Enter' && e.code !== 'NumpadEnter') return;
+      e.preventDefault();
+      confirmPoint();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isOpen, confirmMode, stage, confirmPoint]);
+
   // Timing loop for the settle/collect cycle.
   useEffect(() => {
     if (!isOpen || (stage !== 'capture' && stage !== 'validate') || !currentTarget) return;
 
     const wanted = stage === 'validate' ? TARGET_SETTLED_SAMPLES_VALIDATE : TARGET_SETTLED_SAMPLES;
 
-    const advance = () => {
-      if (stage === 'capture') finishCapturePoint(currentTarget);
-      else finishValidatePoint(currentTarget);
-
-      const next = targetIndex + 1;
-      if (next < targets.length) {
-        beginPoint(next);
-        return;
-      }
-
-      if (stage === 'capture') {
-        // Drop any point the rest of the grid clearly disagrees with, before it
-        // can distort the head-movement fit and the accuracy check after it.
-        setPrunedPoints(calibrationEngine.pruneOutlierAnchors().removed);
-
-        // The posture held during calibration is what the mapping is tied to,
-        // so it becomes the reference for later drift warnings.
-        const posture = liveGazeRef.current?.headPose;
-        if (posture) calibrationEngine.recordPosture(posture);
-
-        if (wantHeadPass) {
-          brief('head_pass');
-        } else {
-          setHeadPassOutcome('skipped');
-          brief('validate');
-        }
-      } else {
-        completeValidation();
-      }
-    };
-
     const tick = () => {
       const elapsed = performance.now() - phaseStartRef.current;
       const settledNow = liveGazeRef.current?.isFixating ?? false;
+
+      if (confirmMode) {
+        // Nothing advances on its own here. The ring reports how much settled
+        // data is behind the client's next press, so a dot that is ready to be
+        // confirmed looks different from one that is not — and holding still
+        // visibly earns something instead of feeling like waiting.
+        const end = Date.now() - CONFIRM_EXCLUDE_MS;
+        const banked = settledWithin(end - CONFIRM_LOOKBACK_MS, end).samples.length;
+        setProgress(Math.min(1, banked / CONFIRM_MIN_SAMPLES));
+        setReadyToConfirm(banked >= CONFIRM_MIN_SAMPLES);
+        if (banked >= CONFIRM_MIN_SAMPLES) setConfirmNudge(false);
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
 
       if (phase === 'settle') {
         // Waiting for the eye to arrive and stop. The ring shows this as a
@@ -494,21 +765,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [
-    isOpen,
-    stage,
-    phase,
-    targetIndex,
-    currentTarget,
-    targets.length,
-    wantHeadPass,
-    beginPoint,
-    finishCapturePoint,
-    finishValidatePoint,
-    completeValidation,
-    brief,
-    tracker,
-  ]);
+  }, [isOpen, stage, phase, currentTarget, confirmMode, settledWithin, advance]);
 
   const beginBriefedPhase = useCallback(() => {
     if (briefFor === 'capture') {
@@ -516,6 +773,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       beginPoint(0);
     } else if (briefFor === 'head_pass') {
       samplesRef.current = [];
+      headCoverageRef.current = EMPTY_COVERAGE;
+      headReferenceRef.current = null;
+      setHeadCoverage(EMPTY_COVERAGE);
+      setHeadMarker({ x: 0, y: 0 });
       phaseStartRef.current = performance.now();
       setPhase('settle');
       setProgress(0);
@@ -609,19 +870,30 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
           isValidation={stage === 'validate'}
           index={targetIndex}
           total={targets.length}
+          confirmMode={confirmMode}
+          readyToConfirm={readyToConfirm}
+          nudge={confirmNudge}
         />
       )}
 
       {stage === 'brief' && (
-        <BriefStage briefing={BRIEFINGS[briefFor]} onStart={beginBriefedPhase} />
+        <BriefStage
+          briefing={BRIEFINGS[briefingKey(briefFor, confirmMode)]}
+          onStart={beginBriefedPhase}
+          confirmMode={briefFor === 'capture' ? confirmMode : undefined}
+          onConfirmModeChange={setConfirmMode}
+        />
       )}
 
-      {stage === 'head_pass' && <HeadPassStage phase={phase} progress={progress} />}
+      {stage === 'head_pass' && (
+        <HeadPassStage phase={phase} coverage={headCoverage} marker={headMarker} />
+      )}
 
       {stage === 'result' && (
         <ResultStage
           prunedCount={prunedPoints.length}
           headPassOutcome={headPassOutcome}
+          headPassCoverage={headPassCoverage}
           validation={validation}
           failedPoints={failedPoints}
           onRedo={() => setStage('position')}
@@ -760,7 +1032,10 @@ const CaptureStage: React.FC<{
   isValidation: boolean;
   index: number;
   total: number;
-}> = ({ spec, phase, progress, isValidation, index, total }) => {
+  confirmMode: boolean;
+  readyToConfirm: boolean;
+  nudge: boolean;
+}> = ({ spec, phase, progress, isValidation, index, total, confirmMode, readyToConfirm, nudge }) => {
   const collecting = phase === 'collect';
   const ringRadius = 30;
   const circumference = 2 * Math.PI * ringRadius;
@@ -772,7 +1047,15 @@ const CaptureStage: React.FC<{
           needed reading was said on the briefing card, before the eyes were
           committed to the dot. */}
       <p className="absolute top-8 left-1/2 -translate-x-1/2 text-lg font-medium text-ink-soft text-center">
-        {collecting ? 'Hold it…' : 'Look at the dot'}
+        {confirmMode
+          ? nudge
+            ? 'Hold still a moment longer, then press space'
+            : readyToConfirm
+              ? 'Press space'
+              : 'Look at the dot and hold still'
+          : collecting
+            ? 'Hold it…'
+            : 'Look at the dot'}
       </p>
 
       {/*
@@ -797,13 +1080,13 @@ const CaptureStage: React.FC<{
             fills regardless teaches everyone to trust a point that was never
             really captured.
           */}
-          {collecting && (
+          {(collecting || confirmMode) && (
             <circle
               cx={40}
               cy={40}
               r={ringRadius}
               fill="none"
-              stroke="var(--color-sage-500)"
+              stroke={confirmMode && readyToConfirm ? 'var(--color-sage-400)' : 'var(--color-sage-500)'}
               strokeWidth={3}
               strokeLinecap="round"
               strokeDasharray={circumference}
@@ -812,14 +1095,41 @@ const CaptureStage: React.FC<{
               style={{ transition: 'stroke-dashoffset 90ms linear' }}
             />
           )}
+          {/*
+            In confirmed mode a full ring means "ready", not "done" — so it
+            gets a second, wider halo rather than simply completing. A closed
+            ring that then sits there would read as a capture that has already
+            happened, and the client would stop looking a moment before the
+            samples they are about to confirm are taken.
+          */}
+          {confirmMode && readyToConfirm && (
+            <circle
+              cx={40}
+              cy={40}
+              r={ringRadius + 7}
+              fill="none"
+              stroke="var(--color-sage-400)"
+              strokeWidth={2}
+              opacity={0.55}
+              className="animate-pulse"
+            />
+          )}
           {/* While waiting, the dot breathes rather than filling a ring —
               something to rest the eye on, without implying progress. */}
           <circle
             cx={40}
             cy={40}
-            r={collecting ? 4 : 7}
-            fill={collecting ? 'var(--color-sage-500)' : 'var(--color-clay-400)'}
-            className={collecting ? undefined : 'animate-pulse'}
+            r={collecting && !confirmMode ? 4 : 7}
+            fill={
+              confirmMode
+                ? readyToConfirm
+                  ? 'var(--color-sage-500)'
+                  : 'var(--color-clay-400)'
+                : collecting
+                  ? 'var(--color-sage-500)'
+                  : 'var(--color-clay-400)'
+            }
+            className={confirmMode ? undefined : collecting ? undefined : 'animate-pulse'}
           />
         </svg>
       </div>
@@ -855,7 +1165,13 @@ const CaptureStage: React.FC<{
  * — which is a fair share of the people this is built for — gets the same
  * instruction as everyone else.
  */
-const BriefStage: React.FC<{ briefing: Briefing; onStart: () => void }> = ({ briefing, onStart }) => {
+const BriefStage: React.FC<{
+  briefing: Briefing;
+  onStart: () => void;
+  /** Present only on the capture briefing, where the choice is offered. */
+  confirmMode?: boolean;
+  onConfirmModeChange: (value: boolean) => void;
+}> = ({ briefing, onStart, confirmMode, onConfirmModeChange }) => {
   useEffect(() => {
     speakPrompt(briefing.spoken);
     return () => cancelSpeech();
@@ -886,6 +1202,26 @@ const BriefStage: React.FC<{ briefing: Briefing; onStart: () => void }> = ({ bri
           {briefing.action}
         </button>
         <p className="text-xs text-ink-faint">or press space</p>
+
+        {/*
+          Offered here rather than buried in settings, because the person who
+          needs it is in front of the screen right now. Confirming each point is
+          more accurate and is the default, but it assumes a client who can
+          press a key at the right moment — which rules out a fair share of the
+          people this is built for. Hands-free is the same flow with the eye's
+          own stillness standing in for the press.
+        */}
+        {confirmMode !== undefined && (
+          <label className="inline-flex items-center gap-2.5 text-sm text-ink-soft cursor-pointer pt-2">
+            <input
+              type="checkbox"
+              checked={!confirmMode}
+              onChange={e => onConfirmModeChange(!e.target.checked)}
+              className="w-4 h-4 accent-[var(--color-sage-500)]"
+            />
+            Hands-free — fill each dot automatically instead of pressing space
+          </label>
+        )}
       </div>
     </div>
   );
@@ -901,46 +1237,46 @@ const BriefStage: React.FC<{ briefing: Briefing; onStart: () => void }> = ({ bri
  * eyes counter-rotate — which is what lets the tracker stay accurate when they
  * shift in the chair later.
  */
-const HeadPassStage: React.FC<{ phase: Phase; progress: number }> = ({ phase, progress }) => {
+const HeadPassStage: React.FC<{
+  phase: Phase;
+  coverage: HeadCoverage;
+  marker: { x: number; y: number };
+}> = ({ phase, coverage, marker }) => {
   const collecting = phase === 'collect';
+  const next = nextDirection(coverage);
 
   // Spoken at the moment it becomes relevant, because this is the one phase
   // where the client has to keep doing something while their eyes are fixed.
   useEffect(() => {
-    if (collecting) speakPrompt('Now turn your head slowly side to side, then nod.');
+    if (collecting) speakPrompt('Keep your eyes on the dot, and move your head to fill the ring.');
   }, [collecting]);
-  const radius = 34;
-  const circumference = 2 * Math.PI * radius;
+
+  // One direction at a time, spoken as it becomes the one that is missing. The
+  // ring shows the whole task; the voice only ever names the next step, so a
+  // client who cannot read the screen is never asked for two things at once.
+  useEffect(() => {
+    if (collecting && next) speakPrompt(DIRECTION_PROMPT[next]);
+  }, [collecting, next]);
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-8 px-6">
       <div className="text-center max-w-md space-y-2">
         <h3 className="text-2xl font-semibold text-ink">Keep looking at the dot</h3>
         <p className="text-lg text-ink-soft leading-relaxed">
-          {collecting ? 'Now move your head' : 'Settle on the dot…'}
+          {collecting ? 'Move your head until the ring is full' : 'Settle on the dot…'}
         </p>
       </div>
 
-      <svg width={90} height={90} className="overflow-visible">
-        <circle cx={45} cy={45} r={radius} fill="none" stroke="var(--border-strong)" strokeWidth={3} />
-        <circle
-          cx={45}
-          cy={45}
-          r={radius}
-          fill="none"
-          stroke={collecting ? 'var(--color-sage-500)' : 'var(--color-clay-300)'}
-          strokeWidth={3}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={circumference * (1 - progress)}
-          transform="rotate(-90 45 45)"
-        />
-        <circle cx={45} cy={45} r={5} fill="var(--color-sage-500)" />
-      </svg>
+      <HeadCoverageRing
+        coverage={coverage}
+        markerX={marker.x}
+        markerY={marker.y}
+        active={collecting}
+      />
 
       {collecting && (
-        <p className="text-lg font-medium text-sage-600">
-          {progress < 0.5 ? 'Turn side to side' : 'Now nod gently'}
+        <p className="text-lg font-medium text-sage-600 h-7">
+          {next ? DIRECTION_PROMPT[next] : 'That is it — hold still'}
         </p>
       )}
     </div>
@@ -979,10 +1315,21 @@ const ResultStage: React.FC<{
   failedPoints: number[];
   prunedCount: number;
   headPassOutcome: 'pending' | 'measured' | 'skipped' | 'failed';
+  /** How full the head-movement ring got, 0-1; distinguishes the two failure causes. */
+  headPassCoverage: number;
   onRedo: () => void;
   onRecheck: () => void;
   onAccept: () => void;
-}> = ({ validation, failedPoints, prunedCount, headPassOutcome, onRedo, onRecheck, onAccept }) => {
+}> = ({
+  validation,
+  failedPoints,
+  prunedCount,
+  headPassOutcome,
+  headPassCoverage,
+  onRedo,
+  onRecheck,
+  onAccept,
+}) => {
   if (!validation || !Number.isFinite(validation.accuracyDeg)) {
     return (
       <div className="flex-1 flex items-center justify-center px-6">
@@ -1001,7 +1348,6 @@ const ResultStage: React.FC<{
   }
 
   const grade = GRADE_COPY[validation.grade];
-  const quality = calibrationEngine.getModel().quality;
 
   return (
     <div className="flex-1 overflow-auto">
@@ -1058,13 +1404,15 @@ const ResultStage: React.FC<{
           <p className="text-xs text-ink-faint mt-3 leading-relaxed">
             Measured at five points the tracker was not taught, so this is a fair test rather than a
             self-assessment.
-            {/* Leave-one-out error is only informative once there are more
-                points than the model has parameters; with five it mostly
-                measures extrapolation and looks alarming for no reason. */}
-            {quality && quality.anchorCount >= 9 && quality.crossValidatedErrorDeg > 0 && (
-              <> Leaving each set-up point out in turn, the rest predicted it to within{' '}
-              {quality.crossValidatedErrorDeg.toFixed(1)}°.</>
-            )}
+            {/* The leave-one-out figure used to be quoted here too. It was
+                withdrawn: measured against synthetic data whose true error is
+                known, it overstates by about three and a half times, because
+                removing a set-up point leaves a hole in the local correction
+                that never exists in use. It is still the right tool for
+                comparing two models on the same points — where the bias
+                cancels — so it still drives point pruning and model choice, and
+                it is still reported in diagnostics. It just is not an accuracy
+                figure to put in front of a client. See docs/accuracy.md. */}
           </p>
         </div>
 
@@ -1077,7 +1425,9 @@ const ResultStage: React.FC<{
               {headPassOutcome === 'skipped' &&
                 'Not measured. Tracking will drift if you move much from where you are sitting now — a chin or forehead rest, or running this step, both help.'}
               {headPassOutcome === 'failed' &&
-                'There was not enough head movement to measure anything, so a standard allowance is being used. You can run set-up again and move your head a little more during that step.'}
+                (headPassCoverage < 0.9
+                  ? 'The ring was not filled, so there was not enough head movement to measure anything and a standard allowance is being used. Running set-up again and reaching further in each direction should fix it.'
+                  : 'The ring was filled, but the movement did not produce a usable measurement — usually the eyes drifted off the dot while the head moved, or the face was hard to track at the extremes. A standard allowance is being used instead.')}
             </p>
           </div>
         )}

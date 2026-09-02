@@ -43,6 +43,7 @@ export const DEFAULT_TRACKING_SETTINGS: TrackingSettings = {
   penMode: 'auto_stream',
   audioEnabled: true,
   spokenPrompts: true,
+  confirmCalibrationPoints: true,
   showWebcamPiP: true,
   showLandmarkMesh: true,
   showGazeTrail: true,
@@ -52,6 +53,35 @@ export const DEFAULT_TRACKING_SETTINGS: TrackingSettings = {
   strokeGlowColor: '#7cc4b6',
   strokeWidth: 6,
 };
+
+const SETTINGS_STORAGE_KEY = 'lantern.trackingSettings';
+
+/**
+ * Loads the saved tracking settings, over the defaults.
+ *
+ * Merging rather than replacing matters as much as the storage itself: settings
+ * saved by an older build will not contain keys added since, and a stored
+ * object used as-is would leave those undefined — a missing dwell time or
+ * filter cutoff is not a harmless gap, it is a broken tracker. Anything the
+ * stored object does not mention keeps its default.
+ */
+export function loadTrackingSettings(): TrackingSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_TRACKING_SETTINGS };
+    return { ...DEFAULT_TRACKING_SETTINGS, ...JSON.parse(raw) };
+  } catch {
+    return { ...DEFAULT_TRACKING_SETTINGS };
+  }
+}
+
+export function saveTrackingSettings(settings: TrackingSettings) {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // Storage unavailable (private browsing); the session still works.
+  }
+}
 
 /** Landmarks stay unstable for a moment after the lids reopen. */
 const POST_BLINK_HOLD_MS = 110;

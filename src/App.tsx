@@ -14,7 +14,13 @@ import {
   Target,
 } from 'lucide-react';
 import { ActivityMode, TrackingSettings } from './types';
-import { DEFAULT_TRACKING_SETTINGS, FaceMeshTracker, TrackerStatus } from './services/faceMeshTracker';
+import {
+  DEFAULT_TRACKING_SETTINGS,
+  FaceMeshTracker,
+  TrackerStatus,
+  loadTrackingSettings,
+  saveTrackingSettings,
+} from './services/faceMeshTracker';
 import { viewingGeometry } from './services/viewingGeometry';
 import { soundEngine } from './services/audio';
 import { setSpeechEnabled } from './services/speech';
@@ -58,7 +64,19 @@ export default function App() {
   const [isRecentreOpen, setIsRecentreOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
-  const [mouseMode, setMouseMode] = useState(false);
+  /**
+   * Drive the pointer with the mouse instead of the eyes.
+   *
+   * Normally reached from the "use the mouse" button after the camera fails.
+   * The ?mouse=1 URL also switches it on up front, which is how the app gets
+   * demonstrated on a machine with no webcam — a therapist showing a family
+   * what the activities look like before setting anything up — and how the
+   * calibration flow is driven end to end in a browser test, where the
+   * expected error is exactly zero and any coordinate mistake is unmissable.
+   */
+  const [mouseMode, setMouseMode] = useState(
+    () => new URLSearchParams(window.location.search).get('mouse') === '1'
+  );
   const [theme, setTheme] = useState<'light' | 'dim'>('light');
   const [toast, setToast] = useState<string | null>(null);
   const [navOpen, setNavOpen] = useState(false);
@@ -70,7 +88,11 @@ export default function App() {
   // and putting them in state re-rendered the entire application at camera rate.
   const landmarksRef = useRef<any[] | null>(null);
 
-  const [settings, setSettings] = useState<TrackingSettings>({ ...DEFAULT_TRACKING_SETTINGS });
+  // Restored from storage rather than reset each visit: these are a clinician's
+  // choices about a particular client — dwell time, filter response, whether
+  // prompts are spoken — and having to set them again after every refresh made
+  // them not worth setting.
+  const [settings, setSettings] = useState<TrackingSettings>(loadTrackingSettings);
   // Read by the keyboard handler, which is registered once and must not close
   // over a stale copy of the settings.
   const settingsRef = useRef(settings);
@@ -98,6 +120,9 @@ export default function App() {
 
     trackerRef.current = tracker;
     tracker.updateSettings(settings);
+    if (new URLSearchParams(window.location.search).get('mouse') === '1') {
+      tracker.setSimulatedPointer(true);
+    }
     // The model is fetched up front so the first activity starts promptly, but
     // the camera is released again immediately: the app opens on home.
     tracker.initialize().then(() => {
@@ -125,10 +150,19 @@ export default function App() {
     }
   }, [shouldTrack, mouseMode, trackerStatus]);
 
+  const handleResetSettings = useCallback(() => {
+    const defaults = { ...DEFAULT_TRACKING_SETTINGS };
+    setSettings(defaults);
+    trackerRef.current?.updateSettings(defaults);
+    saveTrackingSettings(defaults);
+    setToast('Settings put back to their defaults');
+  }, []);
+
   const handleUpdateSettings = useCallback((patch: Partial<TrackingSettings>) => {
     setSettings(prev => {
       const next = { ...prev, ...patch };
       trackerRef.current?.updateSettings(next);
+      saveTrackingSettings(next);
       return next;
     });
   }, []);
@@ -410,6 +444,7 @@ export default function App() {
         onThemeChange={setTheme}
         onClose={() => setIsSettingsOpen(false)}
         onUpdateSettings={handleUpdateSettings}
+        onResetSettings={handleResetSettings}
         onRecalibrate={() => {
           setIsSettingsOpen(false);
           setIsCalibrationOpen(true);

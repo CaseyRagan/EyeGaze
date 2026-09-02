@@ -144,6 +144,8 @@ export interface CalibrationQuality {
   /** Mean absolute error at the calibration points themselves (leave-one-out). */
   crossValidatedErrorPx: number;
   crossValidatedErrorDeg: number;
+  /** Which feature set cross-validation chose; see selectFeatureDegree. */
+  featureDegree: number;
   anchorCount: number;
   /** Whether the anchors actually span the screen, or cluster in one region. */
   coverage: number;
@@ -249,6 +251,11 @@ export interface TrackingSettings {
   audioEnabled: boolean;
   /** Read calibration instructions aloud, for eyes that are busy on a target. */
   spokenPrompts: boolean;
+  /**
+   * Require the client to press space to record each calibration point,
+   * instead of the dot filling on its own once the eye holds still.
+   */
+  confirmCalibrationPoints: boolean;
   showWebcamPiP: boolean;
   showLandmarkMesh: boolean;
   showGazeTrail: boolean;

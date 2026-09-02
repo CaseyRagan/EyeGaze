@@ -159,7 +159,40 @@ aliased. No amount of cleverness separates them from that data.
 
 Holding the target fixed while the head moves removes the ambiguity. Every bit
 of variation in the measurement is then head-driven, and a plain three-parameter
-regression recovers the coefficients directly. Six seconds is enough.
+regression recovers the coefficients directly.
+
+### How much movement, and how the client knows
+
+The pass used to run for a fixed six seconds against the instruction "slowly
+turn your head side to side, then nod". That instruction is clear about *what*
+and silent about *how much*, and testers who followed it faithfully still moved
+too little — while the step reported success anyway, because a fit that cannot
+trust its own estimate falls back to the nominal constants rather than failing
+loudly. The visible result was a completed step and a head gain of exactly
+1.0 on both axes, which is the fallback wearing the same clothes as a
+measurement.
+
+Both halves of that are fixed. The amount is now shown as a ring of four arcs
+around the target, in the manner of Face ID's set-up: each arc fills as the head
+reaches far enough in that direction, a marker inside the ring shows where the
+head currently is, and the pass ends when the ring is full rather than when a
+clock runs out. A client can see how far is far enough, and can see that they
+are finished.
+
+The targets are 0.16 rad (about 9°) of yaw and 0.10 rad (about 6°) of pitch,
+asymmetric because turning is comfortable over a wider range than nodding. A
+sweep to those peaks and back has a standard deviation near 0.11 rad, against
+the 0.02 rad the fit needs before it will trust an axis — so a client who
+manages half of what the ring asks for still clears the bar. That relationship
+is a regression check rather than a hope: `scripts/calibrationCheck.ts` plays
+back exactly the movement that fills the ring and requires a real gain to come
+back, so shrinking the ring's targets to make the step feel easier will fail the
+check rather than silently stop measuring anything.
+
+And a gain of exactly 1.0 on both axes is now reported as *not measured*, with
+the ring's final coverage distinguishing the two reasons: the client did not
+move far enough, or they did and the measurement still failed (usually the eyes
+left the dot while the head moved).
 
 Measured on synthetic data whose true coefficients sit 30% away from the nominal
 ones (`scripts/calibrationCheck.ts`), for a 5° head turn combined with a 1.6 cm
@@ -355,6 +388,98 @@ Blinks also corrupted two measurements until this was noticed:
 "Eyes found" excludes blink frames from its denominator. It is meant to say how
 reliably the tracker held on to open eyes, and counting a reflex against that
 both misdescribes the measurement and, shown to a client, discourages blinking.
+
+## Confirming each point, instead of inferring it
+
+Capture used to advance on its own once the eye held still. The reasoning was
+sound as far as it went: before calibration there is no mapping, so there is no
+way to know *where* someone is looking — but fixation is measurable without any
+mapping, and a settled eye during a target's presentation is probably settled on
+that target.
+
+"Probably" is the problem. A client holding a steady gaze on the therapist, on
+their own reflection in the screen, or on the dot they have already finished
+with is perfectly settled, and the dot fills from samples that describe
+somewhere else entirely. Least squares then spreads that point's error across
+the whole surface. Testers reported it in exactly those terms: *the targets
+filled on their own regardless of where I was looking.*
+
+The proxy is now optional, and off by default. The client presses the space bar
+when they are on the dot, because only the person looking knows that. Three
+details make it work rather than merely exist:
+
+- **The samples come from before the press.** Deciding to press and pressing
+  both take time in which the eye can start to leave, and the tail of the window
+  is where anticipation of the next dot shows up. The window closes 130 ms
+  before the key goes down and reaches back 900 ms from there.
+- **Nothing is banked until the eye has arrived.** When a new dot appears the
+  eye is still on the old one and still settled, so without this a dot is ready
+  to confirm the instant it appears, from samples describing the previous
+  target — worse than any noise the mode was built to remove. A saccade has to
+  be seen first; a two-second grace period covers a gaze that never crosses the
+  threshold.
+- **A press with too little behind it is refused, visibly.** Recording it anyway
+  would put back the unverified point this exists to prevent, and refusing it
+  silently would leave the client pressing a key that does nothing.
+
+Hands-free capture remains one checkbox away, on the briefing card as well as in
+settings, because a fair share of the people this is built for cannot press a
+key at a chosen moment. It is the same flow with the eye's own stillness
+standing in for the press.
+
+## Leave-one-out error is pessimistic, and was being quoted as if it were not
+
+The calibration result used to show two numbers: accuracy measured at five held-
+out points, and the mean leave-one-out error over the calibration grid. The
+second was always much larger, and it was being read — including by me — as
+evidence that the grid points disagreed with each other.
+
+Measured against synthetic data whose true error is known
+(`scripts/calibrationCheck.ts`), on a nine-point grid:
+
+| landmark noise | true error at held-out points | leave-one-out says |
+|---|---|---|
+| 0.001 | 32 px | 115 px |
+| 0.004 | 34 px | 115 px |
+| 0.008 | 39 px | 121 px |
+
+It overstates by about 3.4×, and — the giveaway — barely responds to noise at
+all across an eightfold range. The cause is structural, not statistical: the
+model carries a local correction term indexed at each anchor, so removing an
+anchor does not just remove one observation, it removes the correction that
+would have been there in use, leaving a hole no real prediction ever sits in.
+
+So the figure has been withdrawn from the client-facing result. It is still the
+right tool for comparing two models fitted on the same points, where the bias
+cancels, and it still drives outlier pruning and model selection. It is still
+reported in diagnostics, labelled for what it is. It is not an accuracy figure,
+and a report showing 212 px there next to 105 px of measured accuracy is not
+describing a problem.
+
+## Choosing how much model to fit
+
+The feature set used to be chosen by anchor count: nine or more points bought
+the six-parameter surface, four bought four, fewer bought three. Count says what
+can be fitted; it does not say what is worth fitting. If a person's eyes really
+do move linearly with the target, the extra parameters spend themselves on
+measurement noise — the fit through the calibration points improves while
+predictions between them get worse, which is invisible in a check that lands on
+the same points that were fitted.
+
+Selection is now by cross-validation: each affordable feature set is scored by
+leave-one-out, and the simplest one wins unless a richer one beats it by 5%.
+Affordability is judged against the held-out fit rather than the full one, so
+every candidate is still overdetermined with one anchor removed and the number
+being compared is real.
+
+The measured result was not what was expected: **the degree barely matters.**
+Forced to each candidate in turn and measured on held-out points, a nine-point
+grid gives 0.65° at every degree, and a thirteen-point grid 0.33° at every
+degree. The local correction term is doing the work the polynomial was assumed
+to be doing. Selection is kept because it stops an unjustified six-parameter fit
+being made on no evidence, and because the per-degree scores are worth having in
+diagnostics — but it is not where the remaining error is, and the hypothesis
+that degree-3 overfitting explained a large leave-one-out figure was wrong.
 
 ## Things that were tried and did not help
 
