@@ -18,6 +18,13 @@ const STORAGE_KEY = 'gazeflow_calibration_v3';
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
 
+/**
+ * How much better a richer feature set has to cross-validate before it is
+ * preferred over a simpler one. Two models within 5% of each other are within
+ * the noise of a nine-point grid, and the simpler one behaves better outside it.
+ */
+const MODEL_UPGRADE_MARGIN = 0.95;
+
 /** Assumed webcam horizontal field of view, for converting image offsets to cm. */
 const ASSUMED_HFOV_DEG = 60;
 
@@ -197,6 +204,26 @@ export function featureDegreeForAnchorCount(count: number): number {
   return 1;
 }
 
+/** How many free parameters per axis a given feature degree costs. */
+export function parameterCountForDegree(degree: number): number {
+  return buildFeatureRow(0, 0, degree).length;
+}
+
+/**
+ * Which feature sets are worth trying for a given number of anchors, simplest
+ * first.
+ *
+ * Affordability is judged against the leave-one-out fit, not the full one: a
+ * model that only becomes determined when every anchor is present cannot be
+ * cross-validated, so its reported error would be a guess. Requiring one spare
+ * point beyond the parameter count means each candidate is still overdetermined
+ * with one anchor held out, and the number we choose on is real.
+ */
+export function candidateDegrees(count: number): number[] {
+  const affordable = [1, 2, 3].filter(d => count - 1 >= parameterCountForDegree(d) + 1);
+  return affordable.length > 0 ? affordable : [1];
+}
+
 function fitAxis(rows: number[][], targets: number[], lambda: number): number[] | null {
   return ridgeSolve(rows, targets, lambda);
 }
@@ -213,6 +240,8 @@ export class CalibrationEngine {
   };
 
   private anchors: Map<string, CalibrationAnchor> = new Map();
+
+  private featureDegreeOverride: number | null = null;
   private listeners = new Set<() => void>();
 
   constructor() {
@@ -385,7 +414,8 @@ export class CalibrationEngine {
       const anchors = this.getAnchors();
       if (anchors.length <= 5) break;
 
-      const errors = this.leaveOneOutErrors(anchors);
+      const degree = this.model.regression?.degree ?? featureDegreeForAnchorCount(anchors.length);
+      const errors = this.leaveOneOutErrors(anchors, degree);
       if (errors.length === 0) break;
 
       const magnitudes = errors.map(e => e.errorPx);
@@ -414,8 +444,11 @@ export class CalibrationEngine {
     };
   }
 
-  /** Per-anchor leave-one-out error in pixels. */
-  private leaveOneOutErrors(anchors: CalibrationAnchor[]): Array<{ id: string; errorPx: number }> {
+  /** Per-anchor leave-one-out error in pixels, for one candidate feature set. */
+  private leaveOneOutErrors(
+    anchors: CalibrationAnchor[],
+    degree: number
+  ): Array<{ id: string; errorPx: number }> {
     if (anchors.length < 5) return [];
 
     const screenW = window.innerWidth;
@@ -424,7 +457,6 @@ export class CalibrationEngine {
 
     for (let held = 0; held < anchors.length; held++) {
       const subset = anchors.filter((_, i) => i !== held);
-      const degree = featureDegreeForAnchorCount(subset.length);
       const reference: FeaturePosture = {
         yaw: median(subset.map(a => a.headYaw)),
         pitch: median(subset.map(a => a.headPitch)),
@@ -500,7 +532,7 @@ export class CalibrationEngine {
       return this.model;
     }
 
-    const degree = featureDegreeForAnchorCount(anchors.length);
+    const degree = this.selectFeatureDegree(anchors);
     const regression = this.fitRegression(anchors, degree);
 
     if (!regression) {
@@ -515,11 +547,76 @@ export class CalibrationEngine {
       isCalibrated: true,
       lastCalibratedAt: Date.now(),
       regression,
-      quality: this.computeQuality(anchors),
+      quality: this.computeQuality(anchors, degree),
     };
     this.save();
     this.emit();
     return this.model;
+  }
+
+  /**
+   * Picks the feature set by cross-validation rather than by anchor count.
+   *
+   * The count only says what can be fitted, not what is worth fitting. Nine
+   * anchors afford a six-parameter surface, but if the person's eyes really do
+   * move linearly with the target, those extra three parameters spend
+   * themselves on measurement noise: the fit through the calibration points
+   * looks better while predictions between them get worse. That failure is
+   * invisible in the on-screen check, which lands on the same points that were
+   * fitted, and shows up as a client whose cursor is accurate at the nine dots
+   * and wrong everywhere else.
+   *
+   * Leave-one-out error is the test that separates the two, so each candidate
+   * is scored with it and the simplest one wins ties. A richer surface has to
+   * beat the simpler one by a clear margin — 5% — because two models within
+   * noise of each other are not two models, and the simpler one extrapolates
+   * far more gracefully past the edge of the calibrated region.
+   */
+  /**
+   * Forces a feature set instead of choosing one, or null to choose again.
+   *
+   * Exists so the regression check can measure what the alternatives would
+   * actually have scored on held-out points, rather than trusting that
+   * leave-one-out picked well. Nothing in the app sets it.
+   */
+  public overrideFeatureDegree(degree: number | null) {
+    this.featureDegreeOverride = degree;
+    this.refit();
+  }
+
+  /** Cross-validated error for each feature set that was considered, for diagnostics. */
+  public getFeatureDegreeScores(): Array<{ degree: number; looErrorPx: number }> {
+    const anchors = this.getAnchors();
+    return candidateDegrees(anchors.length).map(degree => {
+      const errors = this.leaveOneOutErrors(anchors, degree);
+      return {
+        degree,
+        looErrorPx:
+          errors.length > 0 ? errors.reduce((sum, e) => sum + e.errorPx, 0) / errors.length : NaN,
+      };
+    });
+  }
+
+  private selectFeatureDegree(anchors: CalibrationAnchor[]): number {
+    if (this.featureDegreeOverride !== null) return this.featureDegreeOverride;
+    const candidates = candidateDegrees(anchors.length);
+    let best = candidates[0];
+    let bestError = Infinity;
+
+    for (const degree of candidates) {
+      const errors = this.leaveOneOutErrors(anchors, degree);
+      // Too few anchors to cross-validate at all: fall back to the count rule.
+      if (errors.length === 0) return featureDegreeForAnchorCount(anchors.length);
+
+      const mean = errors.reduce((sum, e) => sum + e.errorPx, 0) / errors.length;
+      if (!Number.isFinite(mean)) continue;
+      if (mean < bestError * MODEL_UPGRADE_MARGIN) {
+        best = degree;
+        bestError = mean;
+      }
+    }
+
+    return best;
   }
 
   private fitRegression(anchors: CalibrationAnchor[], degree: number): RegressionModel | null {
@@ -697,8 +794,8 @@ export class CalibrationEngine {
    * model lands on it. This is the only calibration number worth showing a
    * clinician, because it is the only one the model could not simply memorise.
    */
-  private computeQuality(anchors: CalibrationAnchor[]): CalibrationQuality {
-    const looErrors = this.leaveOneOutErrors(anchors);
+  private computeQuality(anchors: CalibrationAnchor[], degree: number): CalibrationQuality {
+    const looErrors = this.leaveOneOutErrors(anchors, degree);
     const crossValidatedErrorPx =
       looErrors.length > 0 ? looErrors.reduce((sum, e) => sum + e.errorPx, 0) / looErrors.length : 0;
 
@@ -712,6 +809,7 @@ export class CalibrationEngine {
     return {
       crossValidatedErrorPx,
       crossValidatedErrorDeg: viewingGeometry.pixelsToDegrees(crossValidatedErrorPx),
+      featureDegree: degree,
       anchorCount: anchors.length,
       coverage,
     };

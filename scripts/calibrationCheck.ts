@@ -43,6 +43,13 @@ interface Posture {
 
 const STILL: Posture = { yaw: 0, pitch: 0, translateX: 0, translateY: 0 };
 
+/**
+ * Scales the nonlinear part of the truth. Set to 0 for a scenario where the
+ * eye really does move linearly with the target, which is what the model
+ * selection has to recognise.
+ */
+let curvature = 1;
+
 function trueFeatureFor(xNorm: number, yNorm: number, posture: Posture = STILL) {
   const u = xNorm - 0.5;
   const v = yNorm - 0.5;
@@ -59,8 +66,8 @@ function trueFeatureFor(xNorm: number, yNorm: number, posture: Posture = STILL) 
   const headGy = 0.52 * posture.pitch - 0.6 * posture.translateY;
 
   return {
-    gx: 0.16 * u + 0.03 * u * v - 0.02 * u * u * Math.sign(u) + headGx,
-    gy: 0.14 * v - 0.025 * v * v * Math.sign(v) + 0.015 * u * v + headGy,
+    gx: 0.16 * u + curvature * (0.03 * u * v - 0.02 * u * u * Math.sign(u)) + headGx,
+    gy: 0.14 * v + curvature * (-0.025 * v * v * Math.sign(v) + 0.015 * u * v) + headGy,
   };
 }
 
@@ -246,7 +253,8 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       `${ok ? 'ok  ' : 'FAIL'}  ${gridName.padEnd(9)} ${noise.label.padEnd(16)} ` +
         `mean ${meanDeg.toFixed(2)}° (${meanPx.toFixed(0)} px)  ` +
         `worst ${worstDeg.toFixed(2)}° at ${worstLabel}  ` +
-        `reach ${(reachFraction * 100).toFixed(0)}%`
+        `reach ${(reachFraction * 100).toFixed(0)}%  ` +
+        `terms ${engine.getModel().quality?.featureDegree ?? '?'}`
     );
   }
 }
@@ -492,6 +500,154 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   );
   console.log(
     `${leanHandled ? 'ok  ' : 'FAIL'}  after leaning in 50cm -> 40cm            ${afterLeaningIn.toFixed(2)}°`
+  );
+}
+
+/**
+ * Model selection.
+ *
+ * The number of calibration points says what can be fitted; it does not say
+ * what is worth fitting. These two scenarios are the same grid and the same
+ * noise, differing only in whether the underlying eye-to-screen mapping is
+ * actually curved. Choosing by anchor count gets one of them wrong by
+ * construction — it would fit the six-parameter surface to both, spending three
+ * parameters on noise in the linear case. Choosing by cross-validation has to
+ * get both right.
+ */
+{
+  const measureAt = (engine: InstanceType<typeof CalibrationEngine>) => {
+    let sum = 0;
+    for (const [x, y] of TEST_POINTS) {
+      const eyes = perEyeFeatures(x, y, STILL, 0);
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, {
+        yaw: 0, pitch: 0, roll: 0,
+        translateX: 0, translateY: 0,
+        distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1,
+      }, WIDTH, HEIGHT)!;
+      sum += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
+    }
+    return viewingGeometry.pixelsToDegrees(sum / TEST_POINTS.length);
+  };
+
+  const fitGrid = (grid: Array<[number, number]>, noise: number) => {
+    reseed();
+    const engine = new CalibrationEngine();
+    engine.reset();
+    grid.forEach(([x, y], i) => engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, noise)));
+    return engine;
+  };
+
+  // For one grid: what each candidate feature set would really have scored on
+  // held-out points, next to what leave-one-out predicted and what was chosen.
+  const scoreCandidates = (label: string, grid: Array<[number, number]>, noise: number) => {
+    const engine = fitGrid(grid, noise);
+    const chosen = engine.getModel().quality?.featureDegree ?? 0;
+    const scores = engine.getFeatureDegreeScores().map(({ degree, looErrorPx }) => {
+      engine.overrideFeatureDegree(degree);
+      if (engine.getModel().regression?.degree !== degree) console.log('   !! override did not take', degree, engine.getModel().regression?.degree);
+      const trueError = measureAt(engine);
+      return { degree, looErrorPx, trueError };
+    });
+    engine.overrideFeatureDegree(null);
+
+    const best = Math.min(...scores.map(sc => sc.trueError));
+    const chosenScore = scores.find(sc => sc.degree === chosen);
+    // The selector does not have to find the single best model — it has to
+    // avoid the bad ones. Within 15% of the best available is the bar.
+    const ok = chosenScore !== undefined && chosenScore.trueError <= best * 1.15 + 0.05;
+    if (!ok) failures++;
+
+    console.log(
+      `${ok ? 'ok  ' : 'FAIL'}  ${label.padEnd(40)} chose ${chosen}, ` +
+        scores
+          .map(sc => `${sc.degree}: ${sc.trueError.toFixed(2)}° (loo ${sc.looErrorPx.toFixed(0)}px)`)
+          .join('  ')
+    );
+  };
+
+  curvature = 0;
+  scoreCandidates('linear eye, noisy grid', GRIDS['9-point'], 0.006);
+  curvature = 1;
+  scoreCandidates('curved eye, clean grid', GRIDS['13-point'], 0.002);
+  scoreCandidates('curved eye, noisy grid', GRIDS['13-point'], 0.006);
+}
+
+/**
+ * The head-movement ring asks for a specific amount of movement. This checks
+ * that the amount it asks for is actually enough for the fit behind it.
+ *
+ * These two numbers live in different files and are easy to drift apart: shrink
+ * the ring's targets to make the step feel easier, and the step silently stops
+ * measuring anything while still looking complete to the client. The scenario
+ * plays back exactly the movement a client makes when they fill the ring and no
+ * more — a sweep out to the target in each direction — and requires a real gain
+ * to come back rather than the nominal fallback.
+ */
+{
+  const { HEAD_TARGET_YAW, HEAD_TARGET_PITCH, EMPTY_COVERAGE, accumulateCoverage, coverageComplete } =
+    await import('../src/components/HeadCoverageRing');
+
+  reseed();
+  const engine = new CalibrationEngine();
+  engine.reset();
+  GRIDS['9-point'].forEach(([x, y], i) => engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, 0.002)));
+
+  // A client filling the ring: turn one way to the target, back through centre
+  // to the other side, then the same vertically. Sampled at 30 Hz.
+  const ringSamples = Array.from({ length: 240 }, (_, i) => {
+    const t = i / 240;
+    const horizontal = t < 0.5;
+    const phase = (horizontal ? t * 2 : (t - 0.5) * 2) * Math.PI * 2;
+    const posture: Posture = {
+      yaw: horizontal ? HEAD_TARGET_YAW * Math.sin(phase) : 0,
+      pitch: horizontal ? 0 : HEAD_TARGET_PITCH * Math.sin(phase),
+      // Turning the head shifts it slightly; nobody rotates about their own eyes.
+      translateX: horizontal ? 0.03 * Math.sin(phase) : 0,
+      translateY: horizontal ? 0 : 0.012 * Math.sin(phase),
+    };
+    const jittered: Posture = {
+      yaw: posture.yaw + gaussian(0.004),
+      pitch: posture.pitch + gaussian(0.004),
+      translateX: posture.translateX + gaussian(0.002),
+      translateY: posture.translateY + gaussian(0.002),
+    };
+    const eyes = perEyeFeatures(0.5, 0.5, jittered, 0.0016);
+    return {
+      gx: eyes.gx,
+      gy: eyes.gy,
+      headYaw: jittered.yaw,
+      headPitch: jittered.pitch,
+      headTranslateX: jittered.translateX,
+      headTranslateY: jittered.translateY,
+      quality: 0.9,
+    };
+  });
+
+  // The ring reads the same poses the fit does, so "the client filled the ring"
+  // and "the fit had enough to work with" are the same event by construction.
+  let coverage = EMPTY_COVERAGE;
+  for (const sample of ringSamples) {
+    coverage = accumulateCoverage(coverage, sample.headYaw, sample.headPitch, 0, 0).coverage;
+  }
+  const ringFilled = coverageComplete(coverage);
+  if (!ringFilled) failures++;
+  console.log(
+    `${ringFilled ? 'ok  ' : 'FAIL'}  that movement fills the ring             ` +
+      `L ${coverage.left.toFixed(2)}  R ${coverage.right.toFixed(2)}  ` +
+      `U ${coverage.up.toFixed(2)}  D ${coverage.down.toFixed(2)}`
+  );
+
+  const gain = engine.fitHeadGainFromMotionPass(ringSamples);
+  // A gain of exactly 1 on an axis is the fallback, not a measurement.
+  const measured = gain !== null && gain.rotation !== 1 && gain.translation !== 1;
+  // Truth is 0.52 rad^-1 against a nominal 0.4, and 0.6 against the nominal
+  // translation constant, so both should land near 1.3.
+  const plausible = measured && gain.rotation > 1.0 && gain.rotation < 1.7;
+  if (!plausible) failures++;
+
+  console.log(
+    `${plausible ? 'ok  ' : 'FAIL'}  filling the ring is enough to measure    ` +
+      (gain ? `rotation ${gain.rotation.toFixed(2)}, translation ${gain.translation.toFixed(2)}` : 'no fit')
   );
 }
 

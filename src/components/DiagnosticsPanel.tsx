@@ -108,7 +108,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       anchors: calibrationEngine.getAnchors().length,
       degree: model.regression?.degree ?? null,
       headGain: model.headGain ?? null,
+      // Pessimistic by roughly 3.5x against known truth; useful for comparing
+      // models on the same points, not as an accuracy figure. See docs/accuracy.md.
       leaveOneOutErrorPx: model.quality ? Number(model.quality.crossValidatedErrorPx.toFixed(1)) : null,
+      featureTerms: model.quality?.featureDegree ?? null,
       coverage: model.quality ? Number(model.quality.coverage.toFixed(2)) : null,
     },
     lastCheck: validation

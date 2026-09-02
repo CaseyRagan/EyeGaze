@@ -16,6 +16,7 @@ interface SettingsPanelProps {
   onUpdateSettings: (patch: Partial<TrackingSettings>) => void;
   onRecalibrate: () => void;
   onOpenDiagnostics: () => void;
+  onResetSettings: () => void;
 }
 
 const ENGINE_MODES: Array<{ value: TrackingEngineMode; label: string; detail: string }> = [
@@ -34,6 +35,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onUpdateSettings,
   onRecalibrate,
   onOpenDiagnostics,
+  onResetSettings,
 }) => {
   const [geometry, setGeometry] = useState(viewingGeometry.getSettings());
 
@@ -293,6 +295,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           </Section>
 
           <Section title="Calibration" description="" icon={RotateCcw}>
+            <Toggle
+              label="Confirm each point with the space bar"
+              detail="More accurate: only the person looking knows they are on the dot, so they say when. Turn off for a client who cannot press a key reliably — the dot then fills once their gaze holds still."
+              checked={settings.confirmCalibrationPoints}
+              onChange={v => onUpdateSettings({ confirmCalibrationPoints: v })}
+            />
             <button
               onClick={onRecalibrate}
               className="w-full py-3 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium transition-colors"
@@ -321,6 +329,22 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               className="w-full py-3 rounded-xl border border-strong text-ink font-medium hover:bg-[var(--surface-sunken)] transition-colors"
             >
               Open diagnostics
+            </button>
+            {/*
+              Worth having now that settings survive a refresh: a panel this
+              deep, shared between clinicians and clients, will sooner or later
+              be left in a state nobody remembers changing, and "put it back"
+              should not mean clearing site data.
+            */}
+            <button
+              onClick={() => {
+                if (window.confirm('Put every setting back to its default? Your calibration is kept.')) {
+                  onResetSettings();
+                }
+              }}
+              className="w-full py-3 rounded-xl border border-strong text-ink-soft font-medium hover:bg-[var(--surface-sunken)] transition-colors"
+            >
+              Reset all settings
             </button>
           </Section>
         </div>
