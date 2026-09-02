@@ -23,8 +23,51 @@ import { HeadPositionCard } from './HeadPositionCard';
 import { DistanceCheck } from './DistanceCheck';
 import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
+import { cancelSpeech, speakPrompt } from '../services/speech';
 
-type Stage = 'position' | 'capture' | 'head_pass' | 'validate' | 'result';
+type Stage = 'position' | 'brief' | 'capture' | 'head_pass' | 'validate' | 'result';
+
+/**
+ * Which phase a briefing card is introducing.
+ *
+ * Instructions are given *before* each phase rather than during it. Asking
+ * someone to read a sentence while also asking them to hold their gaze on a dot
+ * is asking for two incompatible things at once, and the reading loses — a
+ * tester only noticed the "move your head" instruction at the very end of the
+ * pass it was instructing, because for the whole six seconds he was correctly
+ * staring at the target. Anything that must be understood has to be understood
+ * before the eyes are committed.
+ */
+type BriefFor = 'capture' | 'head_pass' | 'validate';
+
+interface Briefing {
+  title: string;
+  body: string;
+  /** Read aloud when spoken prompts are on. Kept short enough to finish in time. */
+  spoken: string;
+  action: string;
+}
+
+const BRIEFINGS: Record<BriefFor, Briefing> = {
+  capture: {
+    title: 'Look at each dot and hold still',
+    body: 'Dots will appear one at a time. Look at the middle of each one and keep still — it fills in on its own, so there is nothing to press. If you look away it pauses and waits for you.',
+    spoken: 'Look at each dot and hold still until it fills.',
+    action: 'Start',
+  },
+  head_pass: {
+    title: 'Now keep your eyes on the dot and move your head',
+    body: 'One dot, about six seconds. Keep looking straight at it the whole time while you slowly turn your head left and right, then nod gently up and down. Moving your head is the point — your eyes stay on the dot.',
+    spoken: 'Keep your eyes on the dot. Slowly turn your head side to side, then nod.',
+    action: 'I understand',
+  },
+  validate: {
+    title: 'Last part — checking the result',
+    body: 'A few more dots, the same as before. These ones are not teaching the tracker anything; they are measuring how well it learned, so the accuracy figure at the end means something.',
+    spoken: 'A few more dots to check the result.',
+    action: 'Start the check',
+  },
+};
 type Phase = 'settle' | 'collect';
 export type CalibrationDepth = 'quick' | 'standard' | 'precision';
 
@@ -129,6 +172,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const [failedPoints, setFailedPoints] = useState<number[]>([]);
   const [wantHeadPass, setWantHeadPass] = useState(true);
   const [prunedPoints, setPrunedPoints] = useState<string[]>([]);
+  const [briefFor, setBriefFor] = useState<BriefFor>('capture');
   const [headPassOutcome, setHeadPassOutcome] = useState<'pending' | 'measured' | 'skipped' | 'failed'>('pending');
 
   const samplesRef = useRef<CalibrationSample[]>([]);
@@ -172,6 +216,12 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   }), []);
 
   // ---------------------------------------------------------------- capture
+  /** Shows the card for a phase, then runs that phase when the user is ready. */
+  const brief = useCallback((phase: BriefFor) => {
+    setBriefFor(phase);
+    setStage('brief');
+  }, []);
+
   const beginPoint = useCallback((index: number) => {
     setTargetIndex(index);
     setPhase('settle');
@@ -361,7 +411,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         const gain = calibrationEngine.fitHeadGainFromMotionPass(samplesRef.current);
         setHeadPassOutcome(gain ? 'measured' : 'failed');
         soundEngine.playChime(gain ? 640 : 380, 0.15);
-        startValidationPhase();
+        brief('validate');
         return;
       }
 
@@ -370,7 +420,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [isOpen, stage, phase, startValidationPhase]);
+  }, [isOpen, stage, phase, brief]);
 
   // Timing loop for the settle/collect cycle.
   useEffect(() => {
@@ -399,14 +449,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         if (posture) calibrationEngine.recordPosture(posture);
 
         if (wantHeadPass) {
-          samplesRef.current = [];
-          phaseStartRef.current = performance.now();
-          setPhase('settle');
-          setProgress(0);
-          setStage('head_pass');
+          brief('head_pass');
         } else {
           setHeadPassOutcome('skipped');
-          startValidationPhase();
+          brief('validate');
         }
       } else {
         completeValidation();
@@ -460,9 +506,24 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     finishCapturePoint,
     finishValidatePoint,
     completeValidation,
-    startValidationPhase,
+    brief,
     tracker,
   ]);
+
+  const beginBriefedPhase = useCallback(() => {
+    if (briefFor === 'capture') {
+      setStage('capture');
+      beginPoint(0);
+    } else if (briefFor === 'head_pass') {
+      samplesRef.current = [];
+      phaseStartRef.current = performance.now();
+      setPhase('settle');
+      setProgress(0);
+      setStage('head_pass');
+    } else {
+      startValidationPhase();
+    }
+  }, [briefFor, beginPoint, startValidationPhase]);
 
   const startCapture = () => {
     calibrationEngine.reset();
@@ -474,11 +535,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     validationResultsRef.current = [];
     framesSeenRef.current = 0;
     framesUsedRef.current = 0;
-    setStage('capture');
-    beginPoint(0);
+    brief('capture');
   };
 
-  const startValidationOnly = () => startValidationPhase();
+  const startValidationOnly = () => brief('validate');
 
   useEffect(() => {
     if (!isOpen) {
@@ -514,6 +574,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
             <h2 className="text-base font-semibold text-ink">Set up eye tracking</h2>
             <p className="text-xs text-ink-soft">
               {stage === 'position' && 'First — get comfortable'}
+              {stage === 'brief' && 'Before you start'}
               {stage === 'capture' && `Teaching the tracker (${capturedCount}/${targets.length})`}
               {stage === 'head_pass' && 'Allowing for head movement'}
               {stage === 'validate' && `Checking accuracy (${targetIndex + 1}/${targets.length})`}
@@ -549,6 +610,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
           index={targetIndex}
           total={targets.length}
         />
+      )}
+
+      {stage === 'brief' && (
+        <BriefStage briefing={BRIEFINGS[briefFor]} onStart={beginBriefedPhase} />
       )}
 
       {stage === 'head_pass' && <HeadPassStage phase={phase} progress={progress} />}
@@ -703,12 +768,11 @@ const CaptureStage: React.FC<{
 
   return (
     <div className="flex-1 relative">
-      <p className="absolute top-8 left-1/2 -translate-x-1/2 text-sm text-ink-soft text-center max-w-sm">
-        {collecting
-          ? 'Keep holding.'
-          : isValidation
-          ? 'Nearly there — look at each dot and hold still.'
-          : 'Look at the middle of the dot and hold still.'}
+      {/* Few enough words to register peripherally. Anything that genuinely
+          needed reading was said on the briefing card, before the eyes were
+          committed to the dot. */}
+      <p className="absolute top-8 left-1/2 -translate-x-1/2 text-lg font-medium text-ink-soft text-center">
+        {collecting ? 'Hold it…' : 'Look at the dot'}
       </p>
 
       {/*
@@ -777,6 +841,57 @@ const CaptureStage: React.FC<{
 // --------------------------------------------------------------------------
 
 /**
+ * The card shown before each phase.
+ *
+ * Deliberately a hard stop rather than a caption. Everything the client needs
+ * to understand is here, at a readable size, with nothing else on screen
+ * competing for their eyes — and the phase does not begin until they say they
+ * are ready. Once it does begin, the on-screen text drops to a few words that
+ * can be taken in peripherally, because by then their gaze is committed to a
+ * dot and any real reading has to have happened already.
+ *
+ * The instruction is also spoken. For a task that occupies the eyes, the ears
+ * are the only channel left, and a client who cannot read the screen comfortably
+ * — which is a fair share of the people this is built for — gets the same
+ * instruction as everyone else.
+ */
+const BriefStage: React.FC<{ briefing: Briefing; onStart: () => void }> = ({ briefing, onStart }) => {
+  useEffect(() => {
+    speakPrompt(briefing.spoken);
+    return () => cancelSpeech();
+  }, [briefing]);
+
+  // Enter and space start the phase, so a clinician can drive this without
+  // reaching across the client for the mouse.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.code === 'Enter') {
+        e.preventDefault();
+        onStart();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onStart]);
+
+  return (
+    <div className="flex-1 flex items-center justify-center px-6">
+      <div className="max-w-lg text-center space-y-5">
+        <h3 className="text-2xl font-semibold text-ink leading-snug">{briefing.title}</h3>
+        <p className="text-base text-ink-soft leading-relaxed">{briefing.body}</p>
+        <button
+          onClick={onStart}
+          className="px-7 py-3.5 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium text-base transition-colors"
+        >
+          {briefing.action}
+        </button>
+        <p className="text-xs text-ink-faint">or press space</p>
+      </div>
+    </div>
+  );
+};
+
+/**
  * The head-movement pass.
  *
  * The ordinary grid sees each screen position at exactly one head pose, so the
@@ -788,17 +903,21 @@ const CaptureStage: React.FC<{
  */
 const HeadPassStage: React.FC<{ phase: Phase; progress: number }> = ({ phase, progress }) => {
   const collecting = phase === 'collect';
+
+  // Spoken at the moment it becomes relevant, because this is the one phase
+  // where the client has to keep doing something while their eyes are fixed.
+  useEffect(() => {
+    if (collecting) speakPrompt('Now turn your head slowly side to side, then nod.');
+  }, [collecting]);
   const radius = 34;
   const circumference = 2 * Math.PI * radius;
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-8 px-6">
       <div className="text-center max-w-md space-y-2">
-        <h3 className="text-xl font-semibold text-ink">Keep looking at the dot</h3>
-        <p className="text-sm text-ink-soft leading-relaxed">
-          {collecting
-            ? 'Now slowly turn your head a little to each side, then nod gently up and down. Keep your eyes on the dot the whole time.'
-            : 'Settle your gaze on the dot. In a moment you will be asked to move your head.'}
+        <h3 className="text-2xl font-semibold text-ink">Keep looking at the dot</h3>
+        <p className="text-lg text-ink-soft leading-relaxed">
+          {collecting ? 'Now move your head' : 'Settle on the dot…'}
         </p>
       </div>
 
@@ -820,8 +939,8 @@ const HeadPassStage: React.FC<{ phase: Phase; progress: number }> = ({ phase, pr
       </svg>
 
       {collecting && (
-        <p className="text-sm text-ink-faint">
-          {progress < 0.5 ? 'Turn side to side…' : 'Now nod gently…'}
+        <p className="text-lg font-medium text-sage-600">
+          {progress < 0.5 ? 'Turn side to side' : 'Now nod gently'}
         </p>
       )}
     </div>

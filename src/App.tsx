@@ -15,9 +15,9 @@ import {
 } from 'lucide-react';
 import { ActivityMode, TrackingSettings } from './types';
 import { DEFAULT_TRACKING_SETTINGS, FaceMeshTracker, TrackerStatus } from './services/faceMeshTracker';
-import { calibrationEngine } from './services/calibration';
 import { viewingGeometry } from './services/viewingGeometry';
 import { soundEngine } from './services/audio';
+import { setSpeechEnabled } from './services/speech';
 import { GazePointer } from './components/GazePointer';
 import { CameraPreview } from './components/CameraPreview';
 import { CalibrationFlow } from './components/CalibrationFlow';
@@ -32,18 +32,10 @@ import { GazeMazeTask } from './components/Activities/GazeMazeTask';
 import { TargetPopTask } from './components/Activities/TargetPopTask';
 import { GazeTypingTask } from './components/Activities/GazeTypingTask';
 import { ReadingAssessment } from './components/ReadingAssessment';
+import { ActivityDefinition, HomeScreen } from './components/HomeScreen';
 
 /** One place to change the product name. */
 const APP_NAME = 'Lantern';
-
-interface ActivityDefinition {
-  id: ActivityMode;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  group: 'play' | 'assess';
-  /** Shown under the title on first arrival, in plain language. */
-  purpose: string;
-}
 
 const ACTIVITIES: ActivityDefinition[] = [
   { id: 'target_pop', label: 'Find and hold', icon: Target, group: 'play', purpose: 'Locate a target and hold your gaze on it.' },
@@ -55,7 +47,9 @@ const ACTIVITIES: ActivityDefinition[] = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActivityMode>('target_pop');
+  // `null` means the home screen, where the camera is off. Everything about the
+  // camera's lifecycle follows from this one piece of state.
+  const [activeTab, setActiveTab] = useState<ActivityMode | null>(null);
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus>('uninitialized');
   const [trackerError, setTrackerError] = useState<string | null>(null);
   const [videoElement, setVideoElement] = useState<HTMLVideoElement | null>(null);
@@ -67,10 +61,11 @@ export default function App() {
   const [mouseMode, setMouseMode] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dim'>('light');
   const [toast, setToast] = useState<string | null>(null);
-  const [showWelcome, setShowWelcome] = useState(!calibrationEngine.isCalibrated());
   const [navOpen, setNavOpen] = useState(false);
 
   const trackerRef = useRef<FaceMeshTracker | null>(null);
+  /** Guards against pausing the camera if the user dived straight into something. */
+  const startedInsideActivityRef = useRef(false);
   // Landmarks go into a ref, not state: they arrive with every captured frame,
   // and putting them in state re-rendered the entire application at camera rate.
   const landmarksRef = useRef<any[] | null>(null);
@@ -86,6 +81,10 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    setSpeechEnabled(settings.spokenPrompts);
+  }, [settings.spokenPrompts]);
+
+  useEffect(() => {
     const tracker = new FaceMeshTracker({
       onStatusChange: (status, errorMsg) => {
         setTrackerStatus(status);
@@ -99,13 +98,32 @@ export default function App() {
 
     trackerRef.current = tracker;
     tracker.updateSettings(settings);
-    tracker.initialize();
+    // The model is fetched up front so the first activity starts promptly, but
+    // the camera is released again immediately: the app opens on home.
+    tracker.initialize().then(() => {
+      if (!startedInsideActivityRef.current) tracker.pause();
+    });
 
     return () => tracker.dispose();
     // Deliberately runs once: the tracker owns the camera for the session and
     // receives setting changes through updateSettings rather than by restarting.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The camera is only open while it is being used: inside an activity, or
+  // during set-up. Leaving it running on the home screen would put a live
+  // camera light on someone who is not using the tool.
+  const shouldTrack = activeTab !== null || isCalibrationOpen || isRecentreOpen;
+
+  useEffect(() => {
+    const tracker = trackerRef.current;
+    if (!tracker || mouseMode) return;
+    if (shouldTrack) {
+      if (tracker.getStatus() === 'paused') void tracker.resume();
+    } else if (tracker.getStatus() === 'running') {
+      tracker.pause();
+    }
+  }, [shouldTrack, mouseMode, trackerStatus]);
 
   const handleUpdateSettings = useCallback((patch: Partial<TrackingSettings>) => {
     setSettings(prev => {
@@ -146,8 +164,24 @@ export default function App() {
     if (mouseMode) trackerRef.current?.simulateGazeFromPointer(e.clientX, e.clientY);
   };
 
-  const activeDefinition = ACTIVITIES.find(a => a.id === activeTab)!;
-  const isBusy = trackerStatus !== 'running' && !mouseMode;
+  const activeDefinition = ACTIVITIES.find(a => a.id === activeTab);
+  const atHome = activeTab === null;
+
+  const openActivity = useCallback((id: ActivityMode) => {
+    startedInsideActivityRef.current = true;
+    setActiveTab(id);
+    setNavOpen(false);
+    soundEngine.playChime(480, 0.12);
+  }, []);
+
+  const goHome = useCallback(() => {
+    startedInsideActivityRef.current = false;
+    setActiveTab(null);
+    setNavOpen(false);
+  }, []);
+
+  // The camera only has to be ready when something is actually using it.
+  const isBusy = !atHome && trackerStatus !== 'running' && !mouseMode;
 
   // Activities are laid out inside this box rather than the whole window, so a
   // reduced working area shrinks every one of them at once instead of needing
@@ -167,6 +201,9 @@ export default function App() {
       onPointerMove={handlePointerMove}
       className="relative w-screen h-screen overflow-hidden flex flex-col bg-[var(--surface)] text-ink"
     >
+      {/* The home screen carries its own heading and controls, so the activity
+          chrome would only be duplicate furniture there. */}
+      {!atHome && (
       <header className="relative z-30 flex items-center justify-between gap-4 px-5 py-3 border-b border-soft bg-[var(--surface-raised)] shrink-0">
         <div className="flex items-center gap-3 shrink-0">
           <button
@@ -176,14 +213,19 @@ export default function App() {
           >
             <Menu className="w-5 h-5" />
           </button>
-          <div>
+          {/* Clicking the name goes home, which is where people reach first. */}
+          <button
+            onClick={goHome}
+            className="text-left rounded-lg px-1 -mx-1 hover:bg-[var(--surface-sunken)] transition-colors"
+            title="Back to the home screen"
+          >
             <h1 className="text-base font-semibold text-ink leading-tight whitespace-nowrap">{APP_NAME}</h1>
             {/* Decorative, and the first thing worth dropping when the activity
                 tabs need the room. */}
             <p className="hidden 2xl:block text-xs text-ink-faint truncate max-w-[240px]">
-              {activeDefinition.purpose}
+              {activeDefinition?.purpose ?? 'Home'}
             </p>
-          </div>
+          </button>
         </div>
 
         <nav
@@ -197,11 +239,7 @@ export default function App() {
             return (
               <button
                 key={activity.id}
-                onClick={() => {
-                  setActiveTab(activity.id);
-                  setNavOpen(false);
-                  soundEngine.playChime(480, 0.12);
-                }}
+                onClick={() => openActivity(activity.id)}
                 className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
                   isActive
                     ? 'bg-sage-100 text-sage-700'
@@ -248,8 +286,19 @@ export default function App() {
           </button>
         </div>
       </header>
+      )}
 
-      <main className="relative flex-1 overflow-hidden" style={workingInset}>
+      <main className="relative flex-1 overflow-hidden" style={atHome ? undefined : workingInset}>
+        {atHome && (
+          <HomeScreen
+            appName={APP_NAME}
+            activities={ACTIVITIES}
+            onSelect={openActivity}
+            onOpenCalibration={() => setIsCalibrationOpen(true)}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+          />
+        )}
+
         {activeTab === 'single_line' && (
           <GazePaint settings={settings} onUpdateSettings={handleUpdateSettings} />
         )}
@@ -304,42 +353,9 @@ export default function App() {
           </div>
         )}
 
-        {showWelcome && !isBusy && (
-          <div className="absolute inset-0 z-40 bg-[var(--surface)]/95 backdrop-blur-sm flex items-center justify-center px-6">
-            <div className="surface rounded-3xl p-8 max-w-lg w-full space-y-5">
-              <h2 className="text-2xl font-semibold text-ink">Welcome to {APP_NAME}</h2>
-              <p className="text-sm text-ink-soft leading-relaxed">
-                Before anything else, the tracker needs to learn how your eyes map onto this screen.
-                It takes under a minute, and afterwards you get an accuracy figure so you know exactly
-                how much to trust what follows.
-              </p>
-              <p className="text-sm text-ink-soft leading-relaxed">
-                You can skip it and explore — the games will work roughly — but nothing you measure
-                will mean much until set-up is done.
-              </p>
-              <div className="flex flex-wrap gap-3">
-                <button
-                  onClick={() => {
-                    setShowWelcome(false);
-                    setIsCalibrationOpen(true);
-                  }}
-                  className="px-5 py-3 rounded-xl bg-sage-500 hover:bg-sage-600 text-white font-medium transition-colors"
-                >
-                  Start set-up
-                </button>
-                <button
-                  onClick={() => setShowWelcome(false)}
-                  className="px-5 py-3 rounded-xl border border-strong text-ink font-medium hover:bg-[var(--surface-sunken)] transition-colors"
-                >
-                  Look around first
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </main>
 
-      {settings.showGazeReticle && (
+      {settings.showGazeReticle && !atHome && (
         <GazePointer
           color={settings.strokeColor}
           showTrail={settings.showGazeTrail}
@@ -347,7 +363,7 @@ export default function App() {
         />
       )}
 
-      {settings.showWebcamPiP && videoElement && (
+      {settings.showWebcamPiP && videoElement && !atHome && (
         <CameraPreview
           videoElement={videoElement}
           landmarksRef={landmarksRef}
@@ -356,7 +372,7 @@ export default function App() {
         />
       )}
 
-      {settings.showPostureGuide && !isCalibrationOpen && !isRecentreOpen && (
+      {settings.showPostureGuide && !atHome && !isCalibrationOpen && !isRecentreOpen && (
         <HeadAlignmentGuide onRecentre={() => setIsRecentreOpen(true)} />
       )}
 
@@ -365,7 +381,7 @@ export default function App() {
         tracker={trackerRef.current}
         settings={settings}
         onClose={() => setIsCalibrationOpen(false)}
-        onFinished={() => setShowWelcome(false)}
+        onFinished={() => undefined}
       />
 
       <RecentreOverlay

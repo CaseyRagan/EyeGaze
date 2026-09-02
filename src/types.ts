@@ -247,6 +247,8 @@ export interface TrackingSettings {
   minConfidence: number;
   penMode: PenActivationMode;
   audioEnabled: boolean;
+  /** Read calibration instructions aloud, for eyes that are busy on a target. */
+  spokenPrompts: boolean;
   showWebcamPiP: boolean;
   showLandmarkMesh: boolean;
   showGazeTrail: boolean;

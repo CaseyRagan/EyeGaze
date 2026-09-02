@@ -7,7 +7,13 @@ import { soundEngine } from './audio';
 import { OneEuroFilter2D } from './oneEuroFilter';
 import { viewingGeometry } from './viewingGeometry';
 
-export type TrackerStatus = 'uninitialized' | 'loading_model' | 'requesting_camera' | 'running' | 'error';
+export type TrackerStatus =
+  | 'uninitialized'
+  | 'loading_model'
+  | 'requesting_camera'
+  | 'running'
+  | 'paused'
+  | 'error';
 
 export interface TrackerCallbacks {
   onStatusChange?: (status: TrackerStatus, errorMsg?: string) => void;
@@ -36,6 +42,7 @@ export const DEFAULT_TRACKING_SETTINGS: TrackingSettings = {
   minConfidence: 0.2,
   penMode: 'auto_stream',
   audioEnabled: true,
+  spokenPrompts: true,
   showWebcamPiP: true,
   showLandmarkMesh: true,
   showGazeTrail: true,
@@ -292,6 +299,64 @@ export class FaceMeshTracker {
       resolution: this.getCaptureResolution(),
       headPose: this.lastHeadPose,
     };
+  }
+
+  /**
+   * Releases the camera without tearing down the loaded model.
+   *
+   * The camera light going out is the point: someone sitting in front of an
+   * idle therapy tool should not have a live camera pointed at them, and no
+   * amount of "we do not send it anywhere" makes that feel different. The face
+   * model costs a few seconds and a CDN fetch to load, so it stays in memory
+   * and resuming takes about a second with no permission prompt.
+   */
+  public pause() {
+    if (this.status === 'paused' || this.status === 'uninitialized') return;
+
+    if (this.animationFrameId) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+    if (this.stream) {
+      this.stream.getTracks().forEach(track => track.stop());
+      this.stream = null;
+    }
+    if (this.videoElement) this.videoElement.srcObject = null;
+
+    this.lastVideoTime = -1;
+    this.lastDiagnostics = null;
+    this.frameTimes = [];
+    gazeBus.clear();
+    this.setStatus('paused');
+  }
+
+  /** Reopens the camera and restarts tracking. Safe to call when already running. */
+  public async resume(): Promise<void> {
+    if (this.status === 'running') return;
+    if (!this.faceLandmarker) {
+      await this.initialize();
+      return;
+    }
+
+    try {
+      this.disposed = false;
+      this.setStatus('requesting_camera');
+      await this.startCamera();
+      if (this.disposed) return;
+
+      // The filters and the fixation state describe a moment that has passed.
+      this.featureFilter.reset();
+      this.screenFilter.reset();
+      this.prevVelocityPoint = null;
+      this.lastSampleTime = 0;
+      this.heldSince = null;
+
+      this.setStatus('running');
+      this.startTrackingLoop();
+    } catch (err: any) {
+      console.error('Resuming the camera failed:', err);
+      this.setStatus('error', this.describeCameraError(err));
+    }
   }
 
   /** Actual capture resolution, once the browser has picked one. */
