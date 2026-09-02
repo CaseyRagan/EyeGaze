@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Crosshair, Gauge } from 'lucide-react';
 import { calibrationEngine } from '../services/calibration';
 import { useThrottledGaze } from '../services/gazeBus';
@@ -18,6 +18,15 @@ interface SessionBarProps {
 export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => {
   const gaze = useThrottledGaze(4);
   const [, forceUpdate] = useState(0);
+
+  // Confidence collapses during a blink and recovers a moment later. Showing
+  // that live makes the readout twitch several times a minute for a reason the
+  // client can do nothing about, so the last figure measured on open eyes is
+  // held instead.
+  const steadyConfidenceRef = useRef<number | null>(null);
+  if (gaze && gaze.event !== 'blink' && !gaze.isVisiblyInterrupted) {
+    steadyConfidenceRef.current = gaze.confidence;
+  }
 
   useEffect(() => calibrationEngine.subscribe(() => forceUpdate(n => n + 1)), []);
 
@@ -40,7 +49,7 @@ export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => 
     ? 'Starting'
     : gaze.event === 'lost'
     ? 'Eyes not found'
-    : gaze.isHeld
+    : gaze.isVisiblyInterrupted
     ? 'Holding'
     : gaze.event === 'fixation'
     ? 'Steady'
@@ -79,7 +88,9 @@ export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => 
       <div className="flex items-center gap-2 px-3 py-2" title="Signal quality for the current frame">
         <Crosshair className="w-4 h-4 text-ink-faint" />
         <span className="text-sm text-ink-soft tabular-nums">
-          {gaze ? `${Math.round(gaze.confidence * 100)}%` : '—'}
+          {steadyConfidenceRef.current !== null
+            ? `${Math.round(steadyConfidenceRef.current * 100)}%`
+            : '—'}
         </span>
       </div>
     </div>

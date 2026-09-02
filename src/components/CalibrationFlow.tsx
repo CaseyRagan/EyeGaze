@@ -68,6 +68,8 @@ const TARGET_SETTLED_SAMPLES_VALIDATE = 28;
 const COLLECT_TIMEOUT_MS = 3200;
 /** Below this many settled samples, fall back to using everything collected. */
 const MIN_SETTLED_SAMPLES = 8;
+/** Two samples further apart than this did not arrive back to back. */
+const CONSECUTIVE_SAMPLE_MS = 60;
 /** Length of the head-movement pass. Long enough to cover a full sweep twice. */
 const HEAD_PASS_SETTLE_MS = 900;
 const HEAD_PASS_COLLECT_MS = 6000;
@@ -142,9 +144,16 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
    * means a client whose gaze never quite settles still calibrates.
    */
   const settledSamplesRef = useRef<CalibrationSample[]>([]);
-  /** Mapped positions for the settled samples, used by the accuracy check. */
-  const settledPointsRef = useRef<Array<{ x: number; y: number }>>([]);
-  const gazePointsRef = useRef<Array<{ x: number; y: number }>>([]);
+  /**
+   * Mapped positions for the settled samples, with the time each arrived.
+   *
+   * Steadiness is the scatter between *consecutive* samples, so a pair that
+   * straddles a gap — a blink, a dropped frame — measures the gaze's real
+   * travel across that gap rather than any wobble, and inflates the figure
+   * wildly. Keeping the timestamps lets those pairs be excluded.
+   */
+  const settledPointsRef = useRef<Array<{ x: number; y: number; t: number }>>([]);
+  const gazePointsRef = useRef<Array<{ x: number; y: number; t: number }>>([]);
   const framesSeenRef = useRef(0);
   const framesUsedRef = useRef(0);
   const validationResultsRef = useRef<ValidationPointResult[]>([]);
@@ -243,14 +252,21 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     const errorPx = Math.hypot(meanX - targetX, meanY - targetY);
 
     // Precision: root-mean-square distance between successive samples, which is
-    // the figure eye-tracker specifications normally quote.
+    // the figure eye-tracker specifications normally quote. Pairs separated by
+    // more than one frame interval are skipped — across a blink the two samples
+    // are not consecutive in any meaningful sense, and counting the gap as
+    // wobble was turning an ordinary blink into several degrees of reported
+    // instability.
     let sumSq = 0;
+    let pairs = 0;
     for (let i = 1; i < points.length; i++) {
+      if (points[i].t - points[i - 1].t > CONSECUTIVE_SAMPLE_MS) continue;
       const dx = points[i].x - points[i - 1].x;
       const dy = points[i].y - points[i - 1].y;
       sumSq += dx * dx + dy * dy;
+      pairs++;
     }
-    const precisionPx = Math.sqrt(sumSq / Math.max(1, points.length - 1));
+    const precisionPx = pairs > 0 ? Math.sqrt(sumSq / pairs) : NaN;
 
     validationResultsRef.current.push({
       id: String(spec.id),
@@ -306,15 +322,22 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
     tracker.collectSamples((sample: CalibrationSample, gaze: GazeState, usable: boolean) => {
       if (phase !== 'collect') return;
+
+      // Blinks are excluded from the denominator entirely. "Eyes found" is
+      // meant to say how reliably the tracker held on to open eyes; counting
+      // an involuntary reflex against that both misdescribes the measurement
+      // and, shown to a client, discourages them from blinking.
+      if (gaze.event === 'blink') return;
+
       framesSeenRef.current++;
       if (!usable) return;
       framesUsedRef.current++;
       samplesRef.current.push(sample);
       if (gaze.isFixating) {
         settledSamplesRef.current.push(sample);
-        settledPointsRef.current.push({ x: gaze.screenX, y: gaze.screenY });
+        settledPointsRef.current.push({ x: gaze.screenX, y: gaze.screenY, t: gaze.timestamp });
       }
-      gazePointsRef.current.push({ x: gaze.screenX, y: gaze.screenY });
+      gazePointsRef.current.push({ x: gaze.screenX, y: gaze.screenY, t: gaze.timestamp });
     });
 
     return () => tracker.collectSamples(null);

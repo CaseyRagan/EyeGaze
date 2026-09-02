@@ -23,6 +23,7 @@ a CDN on first run, so the first load needs a network connection.
 ```bash
 bun run typecheck          # tsc --noEmit
 bun run check:calibration  # synthetic regression test of the gaze mapping
+bun run check:reading      # reading measures against hand-built gaze streams
 ```
 
 ## Accuracy

@@ -81,7 +81,9 @@ export const GazePaint: React.FC<GazePaintProps> = ({ settings, onUpdateSettings
 
     let latest: Point2D | null = null;
     const unsubscribe = gazeBus.subscribe(gaze => {
-      if (gaze.isHeld || gaze.event === 'lost') return;
+      // A blink must not punch a hole in the stroke; a real loss of tracking
+      // should.
+      if (gaze.isVisiblyInterrupted || gaze.event === 'lost') return;
       latest = { x: gaze.screenX, y: gaze.screenY, time: gaze.timestamp };
     });
 

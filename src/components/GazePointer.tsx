@@ -77,7 +77,9 @@ export const GazePointer: React.FC<GazePointerProps> = ({
 
       const now = performance.now();
 
-      if (trailOn && !gaze.isHeld) {
+      // The trail keeps extending through a blink. Breaking it every time the
+      // lids close left a visible stutter in the line for no benefit.
+      if (trailOn && !gaze.isVisiblyInterrupted) {
         const last = trailRef.current[trailRef.current.length - 1];
         if (!last || Math.hypot(gaze.screenX - last.x, gaze.screenY - last.y) > 2) {
           trailRef.current.push({ x: gaze.screenX, y: gaze.screenY, born: now });
@@ -111,24 +113,27 @@ export const GazePointer: React.FC<GazePointerProps> = ({
       const baseRadius = quiet ? 7 : 13;
       const radius = baseRadius + settled * 2;
 
-      // Held estimates (blinks, lost tracking) are drawn hollow and faint, so
-      // nobody mistakes a frozen marker for a live one.
-      const confidenceAlpha = gaze.isHeld ? 0.25 : 0.35 + gaze.confidence * 0.45;
+      // A genuinely stalled estimate is drawn hollow and faint so nobody
+      // mistakes a frozen marker for a live one — but only once the stall has
+      // outlasted a blink. Flagging every blink taught the user to stop
+      // blinking, which dries the eyes and makes tracking worse.
+      const interrupted = gaze.isVisiblyInterrupted;
+      const confidenceAlpha = interrupted ? 0.25 : 0.35 + gaze.confidence * 0.45;
 
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = withAlpha(strokeColor, gaze.isHeld ? 0.04 : 0.1);
+      ctx.fillStyle = withAlpha(strokeColor, interrupted ? 0.04 : 0.1);
       ctx.fill();
       ctx.lineWidth = quiet ? 1.5 : 2;
       ctx.strokeStyle = withAlpha(strokeColor, confidenceAlpha);
-      if (gaze.isHeld) ctx.setLineDash([3, 4]);
+      if (interrupted) ctx.setLineDash([3, 4]);
       ctx.stroke();
       ctx.setLineDash([]);
 
       if (!quiet) {
         ctx.beginPath();
         ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-        ctx.fillStyle = withAlpha(strokeColor, gaze.isHeld ? 0.3 : 0.85);
+        ctx.fillStyle = withAlpha(strokeColor, interrupted ? 0.3 : 0.85);
         ctx.fill();
       }
 
