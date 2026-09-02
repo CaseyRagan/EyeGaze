@@ -19,7 +19,7 @@ import {
 import { FaceMeshTracker } from '../services/faceMeshTracker';
 import { soundEngine } from '../services/audio';
 import { viewingGeometry } from '../services/viewingGeometry';
-import { PostureGuide } from './PostureGuide';
+import { HeadPositionCard } from './HeadPositionCard';
 import { DistanceCheck } from './DistanceCheck';
 import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
@@ -632,27 +632,22 @@ const PositionStage: React.FC<{
       </div>
 
       <div className="space-y-4">
-        <PostureGuide />
+        <HeadPositionCard />
 
         {/*
-          Distance belongs here, not buried in settings.
-
-          The accuracy figure this whole flow produces is expressed in degrees,
-          and degrees are computed from the viewing distance. An estimate that is
-          out by a factor of two reports twice the error the client actually has,
-          and sends a clinician chasing a tracking problem that does not exist.
-          Thirty seconds here removes that entire class of mistake.
+          Distance belongs in set-up, not buried in settings: the accuracy figure
+          this flow produces is in degrees, and degrees are computed from it. An
+          estimate out by a factor of two reports twice the error the client
+          actually has, and sends a clinician chasing a problem that is not there.
         */}
         <div className="surface rounded-2xl p-5 space-y-3">
           <div>
-            <h4 className="text-sm font-semibold text-ink">How far away are you?</h4>
+            <h4 className="text-sm font-semibold text-ink">Is that distance right?</h4>
             <p className="text-xs text-ink-soft mt-1 leading-relaxed">
-              The accuracy figure at the end is measured in degrees, which depends on this. Worth
-              thirty seconds with a tape measure once.
+              Only worth correcting once. Everything measured in degrees is scaled from it.
             </p>
           </div>
           <DistanceCheck />
-          <GazeRangeCheck />
         </div>
 
         <div className="surface rounded-2xl p-5">
