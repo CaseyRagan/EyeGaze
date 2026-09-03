@@ -316,6 +316,55 @@ if (record.headPass?.samples?.length) {
   }
 }
 
+/**
+ * Does the mapping reach as far as the eye does?
+ *
+ * A fit that under-reaches puts every estimate slightly toward the middle of the
+ * screen: right in the centre, increasingly short at the edges. That looks like
+ * ordinary error in a mean figure and like something specific in a per-point
+ * one, so it is worth measuring directly. Ridge regularisation shrinks weights
+ * toward zero by design, and on a standardised fit that shows up as exactly this.
+ */
+{
+  const engine = new CalibrationEngine();
+  engine.reset();
+  for (const point of capture) {
+    const samples = samplesFor(point, 'settled');
+    if (samples.length) engine.addAnchorFromSamples(`p${point.id}`, point.xNorm, point.yNorm, samples, point.label);
+  }
+  if (record.headPass?.samples?.length) engine.fitHeadGainFromMotionPass(record.headPass.samples);
+
+  const predictedOffsets: number[] = [];
+  const trueOffsets: number[] = [];
+
+  for (const point of validation) {
+    const samples = samplesFor(point, 'settled');
+    if (!samples.length) continue;
+    let sx = 0, sy = 0, n = 0;
+    for (const s of samples) {
+      const m = engine.mapToScreen(s.gx, s.gy, {
+        yaw: s.headYaw, pitch: s.headPitch, roll: 0,
+        translateX: s.headTranslateX, translateY: s.headTranslateY,
+        distanceCm: record.geometry.effectiveDistanceCm, distanceAgreement: 1, interocularSpan: 0.08,
+      }, W, H);
+      if (!m) continue;
+      sx += m.x; sy += m.y; n++;
+    }
+    if (!n) continue;
+    // Distance from screen centre, predicted against true.
+    predictedOffsets.push(Math.hypot(sx / n - W / 2, sy / n - H / 2));
+    trueOffsets.push(Math.hypot(point.xNorm * W - W / 2, point.yNorm * H - H / 2));
+  }
+
+  const reach =
+    predictedOffsets.reduce((a, b) => a + b, 0) / trueOffsets.reduce((a, b) => a + b, 0);
+  console.log('\n--- Does the mapping reach far enough? ---');
+  console.log(
+    `  predictions sit ${(reach * 100).toFixed(0)}% as far from centre as the targets do` +
+      (reach < 0.92 ? '  <- under-reaching' : reach > 1.08 ? '  <- over-reaching' : '  <- about right')
+  );
+}
+
 // --- Where the session was unsteady -----------------------------------------
 
 console.log('\n--- Per point ---');

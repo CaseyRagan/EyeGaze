@@ -829,6 +829,36 @@ per-sample noise this was meant to address; what remains is structural fit
 error, and re-weighting the eyes does not touch it. Two extra model parameters
 for 5% is a bad trade on real data, so the average stands.
 
+## What a number is good for
+
+A single verdict — "good", "needs another go" — answers a question nobody asked.
+What a clinician needs to know is whether *this* session supports *this* task,
+and the tasks differ enormously in what they forgive. Taken from the activities
+themselves rather than invented, the reach of each target (its radius plus the
+assist margin the activity already allows):
+
+| | reach | at 43 cm on a 14" screen |
+|---|---|---|
+| games, large setting | 117 px | 3.1° |
+| games, medium setting | 79 px | 2.1° |
+| spelling by gaze | 60 px | 1.6° |
+| games, small setting | 48 px | 1.3° |
+| reading assessment | 35 px | 0.9° |
+
+Landing exactly on a target's reach means missing about half the time, so
+"comfortable" is set at 60% of it and "workable" at the boundary.
+
+That reframes the grade usefully. A tester at 3.77° was being told his set-up
+had failed and shown a list of physical causes; what he actually needed to know
+is that he is 0.7° away from the large game targets becoming usable, and a
+long way from reading assessment. The result screen now says both, and names the
+accuracy that would bring the next task into range.
+
+It also sets the honest expectation for this whole class of tracker. Reading
+assessment wants under a degree, which is around the best a webcam ever
+manages — that is a hard target, and pretending otherwise in the interface would
+be a disservice to the clinician relying on it.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
