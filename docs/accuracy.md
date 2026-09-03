@@ -51,6 +51,61 @@ Because the gaze features changed meaning, the stored calibration key moved to
 `v4`: a model fitted before this is wrong in a way nothing downstream could
 detect, so old ones are dropped rather than loaded.
 
+## Knowing how big the screen is, without asking
+
+Every figure reported in degrees is scaled by the physical size of the screen,
+and the browser will not tell you it — CSS "inches" are defined as 96 CSS pixels
+and have nothing to do with the glass. So it was a number in settings, which
+people reasonably forgot to set until after they had already calibrated. A wrong
+one is invisible: it rescales every accuracy figure without anything looking
+broken.
+
+Two things are available instead of asking.
+
+**The panel's own resolution.** `screen.width * devicePixelRatio` is the native
+panel resolution, and for the machines this tool runs on — laptops and tablets —
+that identifies the panel, because manufacturers ship a small number of
+distinctive ones. 3024x1964 is a 14-inch MacBook Pro and nothing else. The table
+in `screenSize.ts` is deliberately Apple-heavy: those panels identify exactly. A
+Windows laptop at 1920x1080 is deliberately *absent*, because that resolution
+spans 13 to 17 inches and a guess there would be worse than admitting the guess.
+
+**A bank card.** ID-1 is 85.60 x 53.98 mm by international standard, so a card
+held against an on-screen rectangle the user drags to match measures the screen
+directly. That is exact rather than inferred, and it is what the unknown panels
+get. It also measures millimetres per pixel, which is the quantity everything
+downstream actually wants — the diagonal is only a proxy for it.
+
+The card is also where the figure now lives in the *set-up flow*, next to the
+distance check, rather than only in settings. The failure being prevented is one
+of timing, and no amount of detection helps the panel it cannot recognise.
+
+Worth stating plainly, because it reads worse than it is: **the calibration does
+not depend on this.** Targets are placed as fractions of the window and the model
+is fitted in those fractions, so a wrong screen size produces a wrong *number*,
+not a wrong mapping. Correcting it afterwards re-reports the same session
+correctly.
+
+## A disagreement is not a reason to use a number nobody chose
+
+The viewing distance is estimated two ways, and when they disagreed by enough the
+code fell back to `assumedDistanceCm` — a fixed 55 cm from settings. The
+reasoning was that a measurement the app cannot vouch for is worse than a
+default. It is not. The default is a number nobody chose, and substituting it
+means a client who really is at 40 cm has every figure rescaled by a third with
+no indication anything happened.
+
+Disagreement is real information, but it is information about *how much* to trust
+the figure, not about whether to use it — so it is reported as confidence
+(`good` / `uncertain` / `assumed`) and the interface asks for one tape measure.
+
+This surfaced immediately after the aspect-ratio fix. The two estimates used to
+agree at 0.87, which looked reassuring; with the iris ruler corrected they fell
+to 0.38, which looks worse and is more honest. Their ratio is independent of the
+assumed field of view — both scale with focal length identically — so a stable
+disagreement is telling us the person's anatomy differs from the assumed
+constants, not that the measurement failed.
+
 ## What limits accuracy
 
 The error you actually experience is the sum of four things. They are listed in

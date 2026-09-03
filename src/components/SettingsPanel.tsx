@@ -3,6 +3,7 @@ import { Monitor, RotateCcw, Sliders, Stethoscope, Sun, Volume2, X } from 'lucid
 import { TrackingEngineMode, TrackingSettings } from '../types';
 import { calibrationEngine } from '../services/calibration';
 import { viewingGeometry } from '../services/viewingGeometry';
+import { ScreenSizeCard } from './ScreenSizeCard';
 import { DistanceCheck } from './DistanceCheck';
 import { soundEngine } from '../services/audio';
 import { setSpeechEnabled } from '../services/speech';
@@ -77,14 +78,24 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             description="These two numbers are what turn a pixel error into a degree of visual angle. If they are wrong, every accuracy figure in the app is wrong too."
             icon={Monitor}
           >
-            <Field label="Screen size (diagonal)" value={`${geometry.screenDiagonalInches}"`}>
+            {/*
+              Detection and the card measurement live in one component, shared
+              with the set-up flow, because this is the setting people reported
+              finding only after they had already calibrated. The slider stays
+              underneath for anyone who simply knows their screen.
+            */}
+            <ScreenSizeCard />
+
+            <Field label="Or set it by hand" value={`${geometry.screenDiagonalInches}"`}>
               <input
                 type="range"
                 min={9}
                 max={34}
                 step={0.1}
                 value={geometry.screenDiagonalInches}
-                onChange={e => updateGeometry({ screenDiagonalInches: Number(e.target.value) })}
+                onChange={e =>
+                  updateGeometry({ screenDiagonalInches: Number(e.target.value), screenSizeSource: 'measured' })
+                }
                 className="w-full"
               />
             </Field>

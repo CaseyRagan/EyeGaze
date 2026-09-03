@@ -92,10 +92,12 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       agreement: gaze ? Number(gaze.headPose.distanceAgreement.toFixed(2)) : null,
       inUseCm: Number(viewingGeometry.getEffectiveDistanceCm().toFixed(1)),
       isMeasured: viewingGeometry.isDistanceMeasured(),
+      confidence: viewingGeometry.getDistanceConfidence(),
       userScale: Number(geometry.distanceScale.toFixed(3)),
     },
     screen: {
       diagonalInches: geometry.screenDiagonalInches,
+      diagonalSource: geometry.screenSizeSource,
       viewport: `${window.innerWidth}x${window.innerHeight}`,
       screen: `${window.screen?.width}x${window.screen?.height}`,
       devicePixelRatio: window.devicePixelRatio,

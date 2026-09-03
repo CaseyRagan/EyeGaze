@@ -21,6 +21,7 @@ import { soundEngine } from '../services/audio';
 import { viewingGeometry } from '../services/viewingGeometry';
 import { HeadPositionCard } from './HeadPositionCard';
 import { DistanceCheck } from './DistanceCheck';
+import { ScreenSizeCard } from './ScreenSizeCard';
 import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
 import { cancelSpeech, speakPrompt } from '../services/speech';
@@ -993,6 +994,15 @@ const PositionStage: React.FC<{
 
       <div className="space-y-4">
         <HeadPositionCard />
+
+        {/*
+          Screen size sits here for the same reason distance does, and for one
+          more: it was the setting people kept remembering only after they had
+          finished calibrating. It is now usually recognised outright, so the
+          card mostly just confirms — but when the panel is unknown this is the
+          moment to say so, while it still costs nothing.
+        */}
+        <ScreenSizeCard />
 
         {/*
           Distance belongs in set-up, not buried in settings: the accuracy figure
