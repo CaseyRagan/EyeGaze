@@ -23,7 +23,15 @@ const store = new Map<string, string>();
   localStorage: (globalThis as any).localStorage,
 };
 
-const { CalibrationEngine } = await import('../src/services/calibration');
+const {
+  CalibrationEngine,
+  setEyelidCueEnabled,
+  isEyelidCueEnabled,
+  inCaptureOrder,
+  QUICK_CALIBRATION_TARGETS,
+  DEFAULT_CALIBRATION_TARGETS,
+  PRECISION_CALIBRATION_TARGETS,
+} = await import('../src/services/calibration');
 const { viewingGeometry } = await import('../src/services/viewingGeometry');
 
 const WIDTH = 1440;
@@ -795,6 +803,17 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
 {
   console.log('\n--- An eye the lid hides at the top of the screen ---');
 
+  // The cue is off in the app; two recorded sessions measured it doing harm.
+  // These scenarios still exercise the mechanism, because what is switched off
+  // has to stay proven if it is ever to be switched back on.
+  const offByDefault = !isEyelidCueEnabled();
+  if (!offByDefault) failures++;
+  console.log(
+    `${offByDefault ? 'ok  ' : 'FAIL'}  the cue is off by default                ` +
+      `real sessions measured 8.56° vs 4.22° and 3.41° vs 2.86° against it`
+  );
+  setEyelidCueEnabled(true);
+
   const GRID = GRIDS['9-point'];
   const reach = (eyeModel: EyeModel, useCue: boolean) => {
     reseed();
@@ -956,6 +975,61 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     `${crossoverExists ? 'ok  ' : 'FAIL'}  noisier cues stop being worth taking     ` +
       decisions.map(d => `${d.sigma}:${d.taken ? 'take' : 'drop'}`).join('  ')
   );
+}
+
+setEyelidCueEnabled(false);
+
+/**
+ * Every row has to be captured early, in the middle, and late.
+ *
+ * Capture order and screen row correlated at +0.95 in every recorded session,
+ * which made posture drift over the minute of set-up indistinguishable from a
+ * genuine vertical gaze effect. The property that fixes it is a balance
+ * property, so it is worth asserting as one rather than eyeballing a list of
+ * ids — a single transposed pair would restore the confound silently.
+ */
+{
+  console.log('\n--- No row is captured only at the start or only at the end ---');
+
+  const grids: Array<[string, any[]]> = [
+    ['5-point', QUICK_CALIBRATION_TARGETS],
+    ['9-point', DEFAULT_CALIBRATION_TARGETS],
+    ['13-point', PRECISION_CALIBRATION_TARGETS],
+  ];
+
+  for (const [name, grid] of grids) {
+    const ordered = inCaptureOrder(grid);
+
+    const complete =
+      ordered.length === grid.length &&
+      new Set(ordered.map(t => t.id)).size === grid.length;
+    if (!complete) failures++;
+
+    // Pearson correlation between capture position and vertical position.
+    const positions = ordered.map((_, i) => i);
+    const ys = ordered.map(t => t.yPercent);
+    const mp = positions.reduce((a, b) => a + b, 0) / positions.length;
+    const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const num = positions.reduce((sum, p, i) => sum + (p - mp) * (ys[i] - my), 0);
+    const den =
+      Math.sqrt(positions.reduce((s, p) => s + (p - mp) ** 2, 0)) *
+      Math.sqrt(ys.reduce((s, y) => s + (y - my) ** 2, 0));
+    const r = den > 0 ? num / den : 0;
+
+    const decorrelated = Math.abs(r) < 0.2;
+    if (!decorrelated) failures++;
+
+    const centreFirst =
+      Math.abs(ordered[0].xPercent - 50) < 1 && Math.abs(ordered[0].yPercent - 50) < 1;
+    if (!centreFirst) failures++;
+
+    console.log(
+      `${complete && decorrelated && centreFirst ? 'ok  ' : 'FAIL'}  ${name.padEnd(9)} ` +
+        `order vs row r = ${r >= 0 ? '+' : ''}${r.toFixed(2)}  ` +
+        `(was +0.95 raster)  first point (${ordered[0].xPercent}, ${ordered[0].yPercent})  ` +
+        `${ordered.length}/${grid.length} points`
+    );
+  }
 }
 
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);

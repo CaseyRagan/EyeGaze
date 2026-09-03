@@ -11,6 +11,7 @@ import {
   CalibrationEngine,
   CalibrationPointSpec,
   DEFAULT_CALIBRATION_TARGETS,
+  inCaptureOrder,
   PRECISION_CALIBRATION_TARGETS,
   QUICK_CALIBRATION_TARGETS,
   VALIDATION_TARGETS,
@@ -253,10 +254,12 @@ function targetViewportNorm(spec: CalibrationPointSpec): { xNorm: number; yNorm:
 }
 
 const DEPTH_TARGETS: Record<CalibrationDepth, CalibrationPointSpec[]> = {
-  quick: QUICK_CALIBRATION_TARGETS,
-  standard: DEFAULT_CALIBRATION_TARGETS,
-  precision: PRECISION_CALIBRATION_TARGETS,
+  quick: inCaptureOrder(QUICK_CALIBRATION_TARGETS),
+  standard: inCaptureOrder(DEFAULT_CALIBRATION_TARGETS),
+  precision: inCaptureOrder(PRECISION_CALIBRATION_TARGETS),
 };
+
+const CHECK_TARGETS = inCaptureOrder(VALIDATION_TARGETS);
 
 const DEPTH_COPY: Record<CalibrationDepth, { title: string; detail: string }> = {
   quick: { title: '5 points', detail: 'About 15 seconds. Roughly 2–3° — fine for the games, not for measuring.' },
@@ -360,7 +363,9 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   const phaseStartRef = useRef(0);
   const rafRef = useRef<number | null>(null);
 
-  const targets = stage === 'validate' ? VALIDATION_TARGETS : DEPTH_TARGETS[depth];
+  // The check is shorter than the grid, but it is scored per axis and the same
+  // confound would tilt that score, so it is resequenced too.
+  const targets = stage === 'validate' ? CHECK_TARGETS : DEPTH_TARGETS[depth];
   const currentTarget = targets[targetIndex];
 
   // The newest sample is kept in a ref rather than in state: this screen runs a
