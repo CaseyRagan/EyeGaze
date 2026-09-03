@@ -632,7 +632,13 @@ export class FaceMeshTracker {
     let event: OcularEvent;
     if (inBlinkShadow) {
       event = 'blink';
-      this.slowSinceMs = null;
+      // The fixation clock is deliberately *not* reset here. Clearing it meant
+      // every blink was followed by a fresh run-up to the fixation threshold,
+      // so a steady gaze was reclassified as a saccade for a moment each time
+      // the client blinked — fifteen times a minute, on a held estimate that had
+      // not moved. Everything keyed off fixation flinched with it: the pointer
+      // shrank, the fixation centre was thrown away, and a held target read as
+      // momentarily lost. The eyes were never lost; only the label was.
     } else if (this.velocityDegPerSec > this.settings.saccadeVelocityThreshold) {
       event = 'saccade';
       this.slowSinceMs = null;
@@ -642,7 +648,9 @@ export class FaceMeshTracker {
     }
 
     if (event === 'fixation') {
-      if (this.event !== 'fixation') {
+      // Resuming after a blink continues the fixation it interrupted rather
+      // than starting a new one, so a blink does not split one dwell into two.
+      if (this.event !== 'fixation' && this.event !== 'blink') {
         this.fixationStart = this.slowSinceMs ?? now;
         this.fixationPoints = [];
       }

@@ -958,6 +958,94 @@ recorded session can settle it. `bun run replay <file>` scores every session wit
 the cue and without it, so the next recording answers the question directly
 instead of by screenshot.
 
+## The cue worked, and made accuracy worse
+
+Two runs the day after shipping the eyelid cue, one with the laptop raised to
+eye level and one flat on the desk:
+
+| | before the cue | eye level | on the desk |
+|---|---|---|---|
+| accuracy | 3.0° | 5.2° | 4.8° |
+| side to side | 90% · — | 89% · 1.5° | 92% · 2.0° |
+| up and down | **50%** · — | **120%** · 4.9° | **100%** · 4.2° |
+| steadiness | 0.12° | 0.25° | 0.23° |
+
+The cue did the thing it was added to do — the vertical range came back, from
+half the screen to all of it and past it — and the tracker got worse anyway.
+Vertical error more than doubled and the frame-to-frame wobble doubled with it.
+
+Steadiness doubling is the tell. The gaze signal did not get noisier between
+those sessions; the only thing that changed is what the mapping was doing with
+it. Output wobble scales with the size of the fitted weights, so weights that
+had roughly doubled is the plain reading — and two near-collinear columns are
+exactly how a fit ends up with large weights. Both `gy` and `lidGy` measure
+vertical gaze, so the regression can satisfy every anchor with a large positive
+weight on one and a large negative weight on the other. The anchors are hit, the
+range is restored, and every bit of noise in either signal is multiplied.
+
+### The obvious repair was wrong
+
+The textbook answer is to hand the regression only the part of the cue the iris
+feature cannot already predict — fit `lidGy ~ 1 + gx + gy` and use the residual.
+Collinearity gone, and the polynomial's own coefficients come out as they would
+have without the cue.
+
+Measured on the lidded synthetic eye:
+
+| column | cross-validated error | vertical reach |
+|---|---|---|
+| none | 260 px | 30% |
+| orthogonalised residual | 257 px | 30% |
+| raw | **100 px** | **85%** |
+
+Orthogonalising recovered nothing, because what the cue is *for* is that its
+vertical range does not collapse — and projecting out everything the iris
+already explains removes precisely that, leaving only curvature. The reasoning
+was sound and the measurement disagreed, so the raw column stayed.
+
+### What actually makes it safe
+
+Two things, neither of them a weakening of the column.
+
+**Decline it rather than dilute it.** The model is now fitted both with the cue
+and without, and the cue is kept only when holding an anchor out says it earns
+its place, by the same 5% margin used for choosing polynomial degree. "Ridge
+will shrink it to nothing if it says nothing" was the intention in the first
+version and simply was not true — ridge shrinks *toward* zero, which is not the
+same as declining a column that is hurting. The check now sweeps a cue from
+clean to pure noise and asserts a crossover exists: taken up to a noise sigma of
+0.1, refused at 0.2.
+
+An earlier version of that check also asserted a sign-flipped cue would be
+refused. That was wrong — a linear fit simply gives it a negative coefficient,
+so inverting a cue proves nothing about the guard. What matters is
+signal-to-noise, which is what the sweep tests.
+
+**Withdraw it while a lid is moving.** This is very likely the root cause of the
+regression, and it is the same fault the user had been reporting for weeks as
+losing the target on every blink. The cue is read from the eye region, and a
+descending lid looks a great deal like an eye rolling downward, so `eyeLookDown`
+climbs at the *start* of a blink — long before the lid is closed enough for the
+blink gate at half-open to engage. In that window the cue has spiked, nothing
+has stopped it being mapped, and the estimate lurches toward the bottom of the
+screen. During calibration the same window puts contaminated samples into the
+anchors, which is a noisy cue by construction.
+
+`lidGy` is now withdrawn entirely below 0.65 openness — above the blink
+threshold (0.35) and above the gaze-trust threshold (0.5), because this signal
+starts lying earliest. Null rather than held, so the model stands the term at
+its own fitted mean and the vertical estimate falls back on the iris: degraded,
+rather than actively misled.
+
+### And the blink stopped being an event
+
+Separately, the fixation classifier was resetting its clock on every blink, so a
+perfectly steady gaze was reclassified as a saccade for a moment each time the
+client blinked — fifteen times a minute, on a held estimate that had not moved.
+Everything keyed off fixation flinched with it: the pointer shrank, the fixation
+centre was discarded, and a dwell in progress read as momentarily lost. The eyes
+were never lost. Only the label was, and the label was driving the display.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
