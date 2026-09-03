@@ -27,6 +27,13 @@ export interface HeadPose {
 export interface GazeFeatures {
   gx: number;
   gy: number;
+  /**
+   * A second vertical cue, from the landmarker's eyeLookUp/eyeLookDown outputs
+   * rather than from the iris landmarks. Null when the model does not emit
+   * them. See the note in gazeFeatures.ts for why the vertical axis needs two
+   * opinions and the horizontal axis does not.
+   */
+  lidGy: number | null;
   leftGx: number | null;
   leftGy: number | null;
   rightGx: number | null;
@@ -87,6 +94,8 @@ export interface GazeState {
 export interface CalibrationSample {
   gx: number;
   gy: number;
+  /** The eyelid vertical cue; null on cameras or models that do not supply it. */
+  lidGy: number | null;
   headYaw: number;
   headPitch: number;
   headTranslateX: number;
@@ -111,6 +120,8 @@ export interface CalibrationAnchor {
   yNorm: number;
   gx: number;
   gy: number;
+  /** The eyelid vertical cue, averaged over the accepted samples. */
+  lidGy: number | null;
   headYaw: number;
   headPitch: number;
   headTranslateX: number;
@@ -129,6 +140,12 @@ export interface RegressionModel {
   reference: { yaw: number; pitch: number; translateX: number; translateY: number };
   /** Fitted multipliers on the nominal head-compensation constants. */
   headGain: { rotationX: number; rotationY: number; translation: number };
+  /**
+   * Whether the eyelid vertical cue is a column in this model's design matrix.
+   * Decided at fit time from whether the anchors actually carried it, and
+   * stored because predictions have to build rows the same shape as the fit.
+   */
+  usesLidCue: boolean;
   /** Weights for the standardised design matrix, one set per output axis. */
   weightsX: number[];
   weightsY: number[];
@@ -170,6 +187,28 @@ export interface ValidationResult {
   points: ValidationPointResult[];
   accuracyPx: number;
   accuracyDeg: number;
+  /**
+   * Mean error along each axis on its own, in degrees.
+   *
+   * A single combined figure is the average of two channels that fail
+   * independently, and it hides the case where one of them has stopped working:
+   * a session once reported 3.0 degrees while the vertical mapping was reaching
+   * only half way to its targets, because the horizontal half was healthy
+   * and the check points sat in a band near the middle of the screen where even
+   * a collapsed vertical channel is nearly right.
+   */
+  accuracyDegX: number;
+  accuracyDegY: number;
+  /**
+   * How far the estimate travels from the centre compared with how far the
+   * target does, per axis. 1 means the mapping reaches its targets; 0.4 means
+   * it covers a little over a third of the distance and everything looks
+   * pulled toward the middle of the screen. This is the number that catches a
+   * dead axis, because unlike a mean error it does not shrink just because the
+   * points being tested are close together.
+   */
+  horizontalReach: number;
+  verticalReach: number;
   precisionPx: number;
   precisionDeg: number;
   /** Fraction of frames during validation that produced a usable estimate. */

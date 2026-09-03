@@ -83,7 +83,14 @@ function gaussian(sigma: number) {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * random()) * sigma;
 }
 
-function makeSamples(xNorm: number, yNorm: number, noise: number, count = 30, posture: Posture = STILL) {
+function makeSamples(
+  xNorm: number,
+  yNorm: number,
+  noise: number,
+  count = 30,
+  posture: Posture = STILL,
+  eyeModel: EyeModel = 'ideal'
+) {
   return Array.from({ length: count }, () => {
     // Small involuntary posture variation within a single dwell.
     const jittered: Posture = {
@@ -92,10 +99,11 @@ function makeSamples(xNorm: number, yNorm: number, noise: number, count = 30, po
       translateX: posture.translateX + gaussian(0.004),
       translateY: posture.translateY + gaussian(0.004),
     };
-    const eyes = perEyeFeatures(xNorm, yNorm, jittered, noise);
+    const eyes = perEyeFeatures(xNorm, yNorm, jittered, noise, eyeModel);
     return {
       gx: eyes.gx,
       gy: eyes.gy,
+      lidGy: eyes.lidGy,
       headYaw: jittered.yaw,
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
@@ -146,17 +154,69 @@ const EYE_OFFSET = { left: 0.004, right: -0.003 };
  */
 const rightEyeNoiseMultiplier = 1;
 
-function perEyeFeatures(xNorm: number, yNorm: number, posture: Posture, noise: number) {
+/**
+ * How much of the vertical eye movement the iris landmarks actually report.
+ *
+ * The synthetic eye used to be isotropic — a degree of upward gaze moved gy
+ * exactly as far as a degree of sideways gaze moved gx — and every scenario
+ * passed. A real session then measured the horizontal channel at 0.206 feature
+ * units per screen width and the vertical at 0.041 per screen height, with the
+ * top half of the screen down at 0.017 against a noise floor of 0.001 to 0.006.
+ * The tests could not have caught that, because the fault was in a part of the
+ * eye they did not model: the upper lid, which rises with the gaze and hides
+ * the top of the iris, so the circle fitted to the visible arc has its centre
+ * dragged back down.
+ *
+ * Modelled as a gain that falls off as the eye rolls up. `lidded` reproduces
+ * the measured 5x horizontal-to-vertical ratio and the roughly 4x difference
+ * between the bottom half of the screen and the top; `ideal` keeps the old
+ * behaviour so the existing scenarios still mean what they meant.
+ */
+type EyeModel = 'ideal' | 'lidded';
+
+function verticalVisibility(gyTruth: number): number {
+  // gyTruth is negative looking up. Fitted, not invented: these three numbers
+  // were chosen by grid search so the synthetic eye reproduces both ratios
+  // measured on a real session — horizontal:vertical sensitivity 5.03x against
+  // a measured 5.04x, and bottom-half:top-half vertical sensitivity 3.72x
+  // against a measured 3.72x.
+  const BASE = 0.39;
+  const FLOOR = 0.02;
+  const KNEE = 0.065;
+  return BASE * (FLOOR + (1 - FLOOR) / (1 + Math.exp(-gyTruth / KNEE)));
+}
+
+/**
+ * The second vertical cue, as the landmarker's eyeLookUp/eyeLookDown pair would
+ * report it: coarser and noisier than the iris, but it does not go blind at the
+ * top of the screen, because it is predicted from the whole eye region rather
+ * than from a circle fitted to whatever part of the iris is still showing.
+ */
+function lidCueFor(gyTruth: number, noise: number): number {
+  return gyTruth * 0.9 + gaussian(noise * 2.5);
+}
+
+function perEyeFeatures(
+  xNorm: number,
+  yNorm: number,
+  posture: Posture,
+  noise: number,
+  eyeModel: EyeModel = 'ideal'
+) {
   const truth = trueFeatureFor(xNorm, yNorm, posture);
+  const visibility = eyeModel === 'lidded' ? verticalVisibility(truth.gy) : 1;
+  const seenGy = truth.gy * visibility;
+
   const rightNoise = noise * rightEyeNoiseMultiplier;
   const leftGx = truth.gx * EYE_GAIN.left + EYE_OFFSET.left + gaussian(noise);
-  const leftGy = truth.gy * EYE_GAIN.left + gaussian(noise);
+  const leftGy = seenGy * EYE_GAIN.left + gaussian(noise);
   const rightGx = truth.gx * EYE_GAIN.right + EYE_OFFSET.right + gaussian(rightNoise);
-  const rightGy = truth.gy * EYE_GAIN.right + gaussian(rightNoise);
+  const rightGy = seenGy * EYE_GAIN.right + gaussian(rightNoise);
 
   return {
     gx: (leftGx + rightGx) / 2,
     gy: (leftGy + rightGy) / 2,
+    lidGy: eyeModel === 'lidded' ? lidCueFor(truth.gy, noise) : null,
   };
 }
 
@@ -217,7 +277,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
 
     for (const [x, y] of TEST_POINTS) {
       const eyes = perEyeFeatures(x, y, STILL, 0);
-      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, headPose, WIDTH, HEIGHT);
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, eyes.lidGy, headPose, WIDTH, HEIGHT);
       if (!mapped) {
         console.log(`FAIL  ${gridName} / ${noise.label}: no mapping returned`);
         failures++;
@@ -278,6 +338,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       const mapped = engine.mapToScreen(
         eyes.gx,
         eyes.gy,
+        eyes.lidGy,
         { yaw: posture.yaw, pitch: posture.pitch, roll: 0, translateX: posture.translateX, translateY: posture.translateY, distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1 },
         WIDTH,
         HEIGHT
@@ -328,6 +389,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
       headTranslateY: jittered.translateY,
+      lidGy: null,
       quality: 0.9,
     };
   });
@@ -395,7 +457,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     let sum = 0;
     for (const [x, y] of TEST_POINTS) {
       const eyes = perEyeFeatures(x, y, STILL, 0);
-      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, headPose, WIDTH, HEIGHT)!;
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, eyes.lidGy, headPose, WIDTH, HEIGHT)!;
       sum += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
     }
     return viewingGeometry.pixelsToDegrees(sum / TEST_POINTS.length);
@@ -476,6 +538,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       const mapped = engine.mapToScreen(
         eyes.gx,
         eyes.gy,
+        eyes.lidGy,
         {
           yaw: 0, pitch: 0, roll: 0,
           translateX: 0, translateY: 0,
@@ -520,7 +583,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     let sum = 0;
     for (const [x, y] of TEST_POINTS) {
       const eyes = perEyeFeatures(x, y, STILL, 0);
-      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, {
+      const mapped = engine.mapToScreen(eyes.gx, eyes.gy, eyes.lidGy, {
         yaw: 0, pitch: 0, roll: 0,
         translateX: 0, translateY: 0,
         distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1,
@@ -620,6 +683,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
       headTranslateY: jittered.translateY,
+      lidGy: null,
       quality: 0.9,
     };
   });
@@ -690,6 +754,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       headPitch: jittered.pitch,
       headTranslateX: jittered.translateX,
       headTranslateY: jittered.translateY,
+      lidGy: null,
       quality: 0.9,
     };
   });
@@ -708,6 +773,112 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
         ? `rotation ${bothGain.rotationX.toFixed(2)}, translation ${bothGain.translation.toFixed(2)}`
         : 'no fit')
   );
+}
+
+/**
+ * An eye whose iris goes half-blind looking up.
+ *
+ * This is the scenario the whole suite was missing. Every grid above uses the
+ * `ideal` eye, whose vertical channel is exactly as informative as its
+ * horizontal one, and against that eye a mapping with no vertical cue at all
+ * still scores well. A real session does not behave like that: measured, the
+ * vertical channel carried a fifth of the horizontal one's range, and across
+ * the top half of the screen almost nothing. The reported accuracy stayed
+ * respectable throughout, because it was averaged over a band near the middle
+ * where the signal still exists.
+ *
+ * So this scenario asks two questions the others cannot. Does the reported
+ * figure notice when the top of the screen has become unreachable — measured
+ * as vertical reach, not as a mean error over a comfortable middle. And does
+ * the second cue recover the range the iris lost.
+ */
+{
+  console.log('\n--- An eye the lid hides at the top of the screen ---');
+
+  const GRID = GRIDS['9-point'];
+  const reach = (eyeModel: EyeModel, useCue: boolean) => {
+    reseed();
+    const engine = new CalibrationEngine();
+    engine.reset();
+    GRID.forEach(([x, y], i) => {
+      const samples = makeSamples(x, y, 0.0016, 30, STILL, eyeModel).map(sm => ({
+        ...sm,
+        lidGy: useCue ? sm.lidGy : null,
+      }));
+      engine.addAnchorFromSamples(`p${i}`, x, y, samples);
+    });
+
+    const headPose = {
+      yaw: 0, pitch: 0, roll: 0,
+      translateX: 0, translateY: 0,
+      distanceCm: 55, distanceAgreement: 1, interocularSpan: 0.1,
+    };
+
+    let reachedY = 0;
+    let wantedY = 0;
+    let sumErrPx = 0;
+    for (const [x, y] of TEST_POINTS) {
+      const eyes = perEyeFeatures(x, y, STILL, 0, eyeModel);
+      const mapped = engine.mapToScreen(
+        eyes.gx,
+        eyes.gy,
+        useCue ? eyes.lidGy : null,
+        headPose,
+        WIDTH,
+        HEIGHT
+      );
+      if (!mapped) return null;
+      reachedY += Math.abs(mapped.y / HEIGHT - 0.5);
+      wantedY += Math.abs(y - 0.5);
+      sumErrPx += Math.hypot(mapped.x - x * WIDTH, mapped.y - y * HEIGHT);
+    }
+    return {
+      verticalReach: reachedY / wantedY,
+      meanDeg: viewingGeometry.pixelsToDegrees(sumErrPx / TEST_POINTS.length),
+    };
+  };
+
+  const healthy = reach('ideal', false);
+  const lidded = reach('lidded', false);
+  const rescued = reach('lidded', true);
+
+  if (!healthy || !lidded || !rescued) {
+    console.log('FAIL  lid scenario: no mapping returned');
+    failures++;
+  } else {
+    // The lid must actually cost something, or the scenario is not testing it.
+    const bites = lidded.verticalReach < 0.75;
+    if (!bites) failures++;
+    console.log(
+      `${bites ? 'ok  ' : 'FAIL'}  the lid collapses vertical reach          ` +
+        `${(healthy.verticalReach * 100).toFixed(0)}% -> ${(lidded.verticalReach * 100).toFixed(0)}%`
+    );
+
+    // And the second cue must win most of it back.
+    const recovered =
+      rescued.verticalReach > lidded.verticalReach + 0.15 && rescued.verticalReach > 0.8;
+    if (!recovered) failures++;
+    console.log(
+      `${recovered ? 'ok  ' : 'FAIL'}  the eyelid cue wins the range back        ` +
+        `${(lidded.verticalReach * 100).toFixed(0)}% -> ${(rescued.verticalReach * 100).toFixed(0)}%`
+    );
+
+    const better = rescued.meanDeg < lidded.meanDeg;
+    if (!better) failures++;
+    console.log(
+      `${better ? 'ok  ' : 'FAIL'}  and the error with it                     ` +
+        `${lidded.meanDeg.toFixed(2)}° -> ${rescued.meanDeg.toFixed(2)}°`
+    );
+
+    // The cue must not be a tax on an eye that never needed it.
+    const healthyWithCue = reach('ideal', true);
+    const harmless = healthyWithCue !== null && healthyWithCue.meanDeg < healthy.meanDeg * 1.25;
+    if (!harmless) failures++;
+    console.log(
+      `${harmless ? 'ok  ' : 'FAIL'}  and costs an unaffected eye little       ` +
+        `${healthy.meanDeg.toFixed(2)}° -> ${healthyWithCue?.meanDeg.toFixed(2)}°`
+    );
+  }
 }
 
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);

@@ -119,14 +119,19 @@ interface Variant {
   degree?: number | null;
   headGain?: { rotationX: number; rotationY: number; translation: number } | null;
   stripResiduals?: boolean;
+  /** Fit and score with the eyelid vertical cue withheld. */
+  withoutLidCue?: boolean;
 }
 
 function evaluate(variant: Variant) {
   const engine = new CalibrationEngine();
   engine.reset();
 
+  const strip = (samples: any[]) =>
+    variant.withoutLidCue ? samples.map(s => ({ ...s, lidGy: null })) : samples;
+
   for (const point of capture) {
-    const samples = samplesFor(point, variant.rule ?? 'settled');
+    const samples = strip(samplesFor(point, variant.rule ?? 'settled'));
     if (samples.length === 0) continue;
     engine.addAnchorFromSamples(`p${point.id}`, point.xNorm, point.yNorm, samples, point.label);
   }
@@ -152,7 +157,7 @@ function evaluate(variant: Variant) {
   const perPoint: number[] = [];
 
   for (const point of validation) {
-    const samples = samplesFor(point, variant.rule ?? 'settled');
+    const samples = strip(samplesFor(point, variant.rule ?? 'settled'));
     if (samples.length === 0) continue;
 
     let sx = 0;
@@ -162,6 +167,7 @@ function evaluate(variant: Variant) {
       const mapped = engine.mapToScreen(
         s.gx,
         s.gy,
+        s.lidGy ?? null,
         {
           yaw: s.headYaw,
           pitch: s.headPitch,
@@ -239,6 +245,7 @@ const variants: Variant[] = [
   { label: 'with cross term (degree 2)', degree: 2 },
   { label: 'full quadratic (degree 3)', degree: 3 },
   { label: 'every sample, settled or not', rule: 'all' },
+  { label: 'without the eyelid cue', withoutLidCue: true },
 ];
 
 /**
@@ -336,13 +343,17 @@ if (record.headPass?.samples?.length) {
 
   const predictedOffsets: number[] = [];
   const trueOffsets: number[] = [];
+  const predictedX: number[] = [];
+  const trueX: number[] = [];
+  const predictedY: number[] = [];
+  const trueY: number[] = [];
 
   for (const point of validation) {
     const samples = samplesFor(point, 'settled');
     if (!samples.length) continue;
     let sx = 0, sy = 0, n = 0;
     for (const s of samples) {
-      const m = engine.mapToScreen(s.gx, s.gy, {
+      const m = engine.mapToScreen(s.gx, s.gy, s.lidGy ?? null, {
         yaw: s.headYaw, pitch: s.headPitch, roll: 0,
         translateX: s.headTranslateX, translateY: s.headTranslateY,
         distanceCm: record.geometry.effectiveDistanceCm, distanceAgreement: 1, interocularSpan: 0.08,
@@ -354,15 +365,27 @@ if (record.headPass?.samples?.length) {
     // Distance from screen centre, predicted against true.
     predictedOffsets.push(Math.hypot(sx / n - W / 2, sy / n - H / 2));
     trueOffsets.push(Math.hypot(point.xNorm * W - W / 2, point.yNorm * H - H / 2));
+    // And the same per axis. The combined figure averages two channels that
+    // fail independently: one session read 82% overall while the horizontal
+    // half was at 82% and the vertical half at 39%, and only the split said so.
+    predictedX.push(Math.abs(sx / n - W / 2));
+    trueX.push(Math.abs(point.xNorm * W - W / 2));
+    predictedY.push(Math.abs(sy / n - H / 2));
+    trueY.push(Math.abs(point.yNorm * H - H / 2));
   }
 
-  const reach =
-    predictedOffsets.reduce((a, b) => a + b, 0) / trueOffsets.reduce((a, b) => a + b, 0);
+  const ratio = (a: number[], b: number[]) =>
+    a.reduce((x, y) => x + y, 0) / b.reduce((x, y) => x + y, 0);
+  const reach = ratio(predictedOffsets, trueOffsets);
+  const verdict = (r: number) =>
+    r < 0.92 ? '  <- under-reaching' : r > 1.08 ? '  <- over-reaching' : '  <- about right';
+
   console.log('\n--- Does the mapping reach far enough? ---');
   console.log(
-    `  predictions sit ${(reach * 100).toFixed(0)}% as far from centre as the targets do` +
-      (reach < 0.92 ? '  <- under-reaching' : reach > 1.08 ? '  <- over-reaching' : '  <- about right')
+    `  overall       ${(reach * 100).toFixed(0)}% as far from centre as the targets` + verdict(reach)
   );
+  console.log(`  side to side  ${(ratio(predictedX, trueX) * 100).toFixed(0)}%` + verdict(ratio(predictedX, trueX)));
+  console.log(`  up and down   ${(ratio(predictedY, trueY) * 100).toFixed(0)}%` + verdict(ratio(predictedY, trueY)));
 }
 
 // --- Where the session was unsteady -----------------------------------------

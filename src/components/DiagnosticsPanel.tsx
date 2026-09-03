@@ -110,6 +110,7 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       anchors: calibrationEngine.getAnchors().length,
       degree: model.regression?.degree ?? null,
       headGain: model.headGain ?? null,
+      usesEyelidCue: model.regression?.usesLidCue ?? null,
       // Pessimistic by roughly 3.5x against known truth; useful for comparing
       // models on the same points, not as an accuracy figure. See docs/accuracy.md.
       leaveOneOutErrorPx: model.quality ? Number(model.quality.crossValidatedErrorPx.toFixed(1)) : null,
@@ -120,6 +121,10 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       ? {
           accuracyDeg: Number(validation.accuracyDeg.toFixed(2)),
           accuracyPx: Number(validation.accuracyPx.toFixed(0)),
+          accuracyDegX: Number(validation.accuracyDegX.toFixed(2)),
+          accuracyDegY: Number(validation.accuracyDegY.toFixed(2)),
+          horizontalReach: Number(validation.horizontalReach.toFixed(2)),
+          verticalReach: Number(validation.verticalReach.toFixed(2)),
           precisionDeg: Number(validation.precisionDeg.toFixed(2)),
           trackingRatio: Number(validation.trackingRatio.toFixed(2)),
           perPointDeg: validation.points.map(p => Number(p.errorDeg.toFixed(2))),

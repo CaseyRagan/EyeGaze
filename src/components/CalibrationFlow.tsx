@@ -562,10 +562,37 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
 
     const accuracyDeg = viewingGeometry.pixelsToDegrees(accuracyPx);
 
+    // Per-axis error and reach, from the offsets already measured at each point.
+    // Reach compares how far the estimate travelled from centre with how far it
+    // should have: a mean error flatters a collapsed axis whenever the points
+    // being checked sit close to the middle, and reach does not.
+    const scrW = window.innerWidth;
+    const scrH = window.innerHeight;
+    const axisReach = (
+      norm: (p: ValidationPointResult) => number,
+      offset: (p: ValidationPointResult) => number,
+      size: number
+    ) => {
+      let travelled = 0;
+      let wanted = 0;
+      for (const p of points) {
+        travelled += Math.abs(norm(p) + offset(p) / size - 0.5);
+        wanted += Math.abs(norm(p) - 0.5);
+      }
+      return wanted > 0 ? travelled / wanted : NaN;
+    };
+
+    const meanAbs = (pick: (p: ValidationPointResult) => number) =>
+      points.length > 0 ? points.reduce((s, p) => s + Math.abs(pick(p)), 0) / points.length : NaN;
+
     const result: ValidationResult = {
       points: validationResultsRef.current,
       accuracyPx,
       accuracyDeg,
+      accuracyDegX: viewingGeometry.pixelsToDegrees(meanAbs(p => p.offsetX)),
+      accuracyDegY: viewingGeometry.pixelsToDegrees(meanAbs(p => p.offsetY)),
+      horizontalReach: axisReach(p => p.xNorm, p => p.offsetX, scrW),
+      verticalReach: axisReach(p => p.yNorm, p => p.offsetY, scrH),
       precisionPx,
       precisionDeg: viewingGeometry.pixelsToDegrees(precisionPx),
       trackingRatio,
@@ -1523,6 +1550,8 @@ const ResultStage: React.FC<{
           />
         </div>
 
+        <AxisReport validation={validation} />
+
         {/*
           What the number means for what happens next.
 
@@ -1706,6 +1735,79 @@ const ResultStage: React.FC<{
           )}
         </div>
       </div>
+    </div>
+  );
+};
+
+/**
+ * Side to side and up and down, reported separately.
+ *
+ * The two axes are measured by different parts of the eye and they fail
+ * independently, so averaging them into one number can report a comfortable
+ * figure for a set-up where one direction has stopped working. That is not
+ * hypothetical: a session reported 3.0° while the vertical mapping was
+ * covering half the distance to its targets, and the person testing it could
+ * see the difference on screen long before any number admitted it.
+ *
+ * Reach is the honest measure here rather than error, because error shrinks
+ * when the points being checked are close to the centre — which they are —
+ * while reach asks the question that actually matters: when you looked all the
+ * way over there, did the estimate go all the way over there.
+ */
+const AxisReport: React.FC<{ validation: ValidationResult }> = ({ validation }) => {
+  const axes = [
+    { label: 'Side to side', reach: validation.horizontalReach, deg: validation.accuracyDegX },
+    { label: 'Up and down', reach: validation.verticalReach, deg: validation.accuracyDegY },
+  ];
+  const weakest = Math.min(validation.horizontalReach, validation.verticalReach);
+  const lopsided =
+    Number.isFinite(weakest) &&
+    Math.abs(validation.horizontalReach - validation.verticalReach) > 0.2;
+
+  return (
+    <div className="surface rounded-2xl p-5 space-y-3">
+      <div>
+        <h4 className="text-sm font-semibold text-ink">How far it reaches</h4>
+        <p className="text-xs text-ink-faint mt-1 leading-relaxed">
+          When you looked right to the edge, how far the estimate followed. Under about 80% and
+          the far side of the screen will feel out of reach even when the middle is fine.
+        </p>
+      </div>
+
+      {axes.map(axis => {
+        const pct = Number.isFinite(axis.reach) ? Math.round(axis.reach * 100) : null;
+        const short = pct !== null && pct < 80;
+        return (
+          <div key={axis.label} className="space-y-1">
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-sm text-ink">{axis.label}</span>
+              <span
+                className={`text-sm tabular-nums font-medium ${short ? 'text-honey-700' : 'text-sage-600'}`}
+              >
+                {pct === null ? '—' : `${pct}%`}
+                <span className="text-ink-faint font-normal">
+                  {Number.isFinite(axis.deg) ? ` · ${axis.deg.toFixed(1)}° off` : ''}
+                </span>
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-[var(--surface-sunken)] overflow-hidden">
+              <div
+                className={`h-full rounded-full ${short ? 'bg-honey-500' : 'bg-sage-500'}`}
+                style={{ width: `${Math.max(0, Math.min(100, pct ?? 0))}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+
+      {lopsided && (
+        <p className="text-xs text-ink-soft leading-relaxed pt-1">
+          One direction is reaching much further than the other. That is usually the eyelid
+          rather than anything you did — it covers the top of the iris when you look up, so
+          upward gaze is the hardest thing for a webcam to see. Raising the camera to eye level
+          helps most.
+        </p>
+      )}
     </div>
   );
 };

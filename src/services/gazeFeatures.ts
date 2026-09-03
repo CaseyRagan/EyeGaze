@@ -453,6 +453,51 @@ export function extractGazeFeatures(
   const isBlinkingLeft = openA < 0.35;
   const isBlinkingRight = openB < 0.35;
 
+  // --- A second, independent vertical cue -----------------------------------
+  /*
+   * The geometric feature above measures where the iris centre sits relative to
+   * the eye corners. Horizontally that works well. Vertically it very nearly
+   * does not, and the reason is the eyelid.
+   *
+   * Measured on a real session: across the full width of the screen gx moves
+   * 0.206 per unit of screen; across the full height gy moves 0.041 — five
+   * times less. Split in half it is worse. Over the *bottom* half gy moves
+   * 0.064 per unit; over the top half it moves 0.017, against a per-point noise
+   * of 0.001 to 0.006. In other words, across the entire upper half of the
+   * screen the vertical signal is barely above its own noise, and the mapping
+   * has nothing to fit but a slope through fog.
+   *
+   * That is not a bug in the arithmetic. When the eye rolls up the upper lid
+   * rises with it and covers the top of the iris, so the iris landmarks are
+   * fitted to a partial arc and their centre is pulled back down — cancelling
+   * most of the movement it was supposed to report. Looking down, the lid
+   * follows too but the iris still clears it, which is why the bottom half
+   * survives and the top half does not.
+   *
+   * So take a second opinion from a different instrument. The landmarker also
+   * emits eyeLookUp / eyeLookDown, which are predicted from the whole eye
+   * region rather than from a circle fitted to the visible iris, and therefore
+   * fail in a different way — the useful property here is not that they are
+   * better, but that they are wrong about different things.
+   *
+   * This is offered to the regression as its own column rather than blended in
+   * with a weight chosen here. A fixed blend would be a guess applied to
+   * everyone; a column is a question asked of each person's own calibration,
+   * and if the answer is that this cue tells us nothing, ridge shrinks it to
+   * nothing and the mapping is no worse than it was.
+   *
+   * Signed downward to match gy, which grows toward the bottom of the screen.
+   */
+  const lookDown =
+    ((blendshapes['eyeLookDownLeft'] ?? 0) + (blendshapes['eyeLookDownRight'] ?? 0)) / 2;
+  const lookUp = ((blendshapes['eyeLookUpLeft'] ?? 0) + (blendshapes['eyeLookUpRight'] ?? 0)) / 2;
+  const hasLidCue =
+    'eyeLookDownLeft' in blendshapes ||
+    'eyeLookUpLeft' in blendshapes ||
+    'eyeLookDownRight' in blendshapes ||
+    'eyeLookUpRight' in blendshapes;
+  const lidGy = hasLidCue ? lookDown - lookUp : null;
+
   // --- Binocular fusion -----------------------------------------------------
   // Weight each eye by how open it is and how square-on it is to the camera.
   // A strongly turned head hides the far eye, whose landmarks then drift.
@@ -490,6 +535,7 @@ export function extractGazeFeatures(
   const features: GazeFeatures = {
     gx,
     gy,
+    lidGy,
     leftGx: eyeA?.gx ?? null,
     leftGy: eyeA?.gy ?? null,
     rightGx: eyeB?.gx ?? null,

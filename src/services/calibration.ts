@@ -24,7 +24,7 @@ import { viewingGeometry } from './viewingGeometry';
 // same unit — vertical shrank by the aspect ratio and translateY with it. A model
 // fitted before that is not merely stale, it is wrong in a way nothing downstream
 // could detect, so old ones are dropped rather than loaded.
-const STORAGE_KEY = 'gazeflow_calibration_v5';
+const STORAGE_KEY = 'gazeflow_calibration_v6';
 
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
@@ -172,11 +172,11 @@ export interface CalibrationPointSpec {
 
 /** Quick pass: enough to be usable, not enough to be precise. */
 export const QUICK_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
-  { id: 1, label: 'top left', xPercent: 15, yPercent: 18 },
-  { id: 2, label: 'top right', xPercent: 85, yPercent: 18 },
+  { id: 1, label: 'top left', xPercent: 12, yPercent: 12 },
+  { id: 2, label: 'top right', xPercent: 88, yPercent: 12 },
   { id: 3, label: 'middle', xPercent: 50, yPercent: 50 },
-  { id: 4, label: 'bottom left', xPercent: 15, yPercent: 82 },
-  { id: 5, label: 'bottom right', xPercent: 85, yPercent: 82 },
+  { id: 4, label: 'bottom left', xPercent: 12, yPercent: 88 },
+  { id: 5, label: 'bottom right', xPercent: 88, yPercent: 88 },
 ];
 
 /**
@@ -190,50 +190,57 @@ export const QUICK_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
  * being captured from someone hunting for a dot hidden under a sentence.
  */
 export const DEFAULT_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
-  { id: 1, label: 'top left', xPercent: 12, yPercent: 20 },
-  { id: 2, label: 'top middle', xPercent: 50, yPercent: 20 },
-  { id: 3, label: 'top right', xPercent: 88, yPercent: 20 },
-  { id: 4, label: 'middle left', xPercent: 12, yPercent: 50 },
+  { id: 1, label: 'top left', xPercent: 10, yPercent: 10 },
+  { id: 2, label: 'top middle', xPercent: 50, yPercent: 10 },
+  { id: 3, label: 'top right', xPercent: 90, yPercent: 10 },
+  { id: 4, label: 'middle left', xPercent: 10, yPercent: 50 },
   { id: 5, label: 'middle', xPercent: 50, yPercent: 50 },
-  { id: 6, label: 'middle right', xPercent: 88, yPercent: 50 },
-  { id: 7, label: 'bottom left', xPercent: 12, yPercent: 80 },
-  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 80 },
-  { id: 9, label: 'bottom right', xPercent: 88, yPercent: 80 },
+  { id: 6, label: 'middle right', xPercent: 90, yPercent: 50 },
+  { id: 7, label: 'bottom left', xPercent: 10, yPercent: 90 },
+  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 90 },
+  { id: 9, label: 'bottom right', xPercent: 90, yPercent: 90 },
 ];
 
 /** Thirteen points, for when the extra minute is worth the extra precision. */
 export const PRECISION_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   ...DEFAULT_CALIBRATION_TARGETS,
-  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 35 },
-  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 35 },
-  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 65 },
-  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 65 },
+  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 30 },
+  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 30 },
+  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 70 },
+  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 70 },
 ];
 
 /**
  * Validation points deliberately sit *between* the calibration points. Measuring
  * error at the same places the model was fitted flatters it; measuring between
  * them is what the user's gaze will actually experience.
+ *
+ * They also have to span enough of the screen to be worth measuring. These used
+ * to sit at 28% and 72%, covering the middle 44% of the height — and a session
+ * whose vertical mapping reached only half way to its targets still came back at
+ * 3.0°, because inside a band that narrow even a badly compressed mapping lands
+ * close. The person testing it could see the problem on screen
+ * while every number said the set-up was fine. Widened to 20/80, they still sit
+ * clear of the 10/50/90 grid but now cover most of what anyone actually uses.
  */
 export const VALIDATION_TARGETS: CalibrationPointSpec[] = [
-  { id: 1, label: 'upper left', xPercent: 28, yPercent: 28 },
-  { id: 2, label: 'upper right', xPercent: 72, yPercent: 28 },
+  { id: 1, label: 'upper left', xPercent: 22, yPercent: 20 },
+  { id: 2, label: 'upper right', xPercent: 78, yPercent: 20 },
   { id: 3, label: 'centre', xPercent: 50, yPercent: 50 },
-  { id: 4, label: 'lower left', xPercent: 28, yPercent: 72 },
-  { id: 5, label: 'lower right', xPercent: 72, yPercent: 72 },
+  { id: 4, label: 'lower left', xPercent: 22, yPercent: 80 },
+  { id: 5, label: 'lower right', xPercent: 78, yPercent: 80 },
 ];
 
 /**
  * Builds the design row for one sample, from an already head-compensated
  * feature.
  *
- * The last pair of terms is the difference between what the two eyes report.
- * Averaging them 50/50 and discarding the difference throws away information:
- * the two eyes carry partly independent landmark noise, and real faces are not
- * symmetric — one eye is often slightly further from the camera, or more
- * occluded, or simply shaped differently. Handing the difference to the
- * regression lets it find the weighting that actually predicts this person's
- * gaze, rather than assuming the two eyes deserve equal say.
+ * The first terms are the polynomial in gx and gy. The last, when the camera
+ * supplies it, is the eyelid vertical cue — a second opinion on the vertical
+ * axis from the landmarker's eyeLookUp/eyeLookDown outputs, which fail
+ * differently from the iris landmarks and so cover for them where the lid hides
+ * the iris. It is a column rather than a blend so that each person's own
+ * calibration decides how much it is worth.
  *
  * The polynomial's job is only the eye-to-screen relationship. Head pose is
  * handled entirely by compensateForHead, upstream of this, and deliberately
@@ -246,10 +253,18 @@ export const VALIDATION_TARGETS: CalibrationPointSpec[] = [
  * unknowns to four points produces a confident-looking model that is mostly
  * noise.
  */
-export function buildFeatureRow(gx: number, gy: number, degree: number): number[] {
+export function buildFeatureRow(
+  gx: number,
+  gy: number,
+  degree: number,
+  lidGy: number | null = null
+): number[] {
   const row = [1, gx, gy];
   if (degree >= 2) row.push(gx * gy);
   if (degree >= 3) row.push(gx * gx, gy * gy);
+  // Appended last so a model fitted without it stays readable position by
+  // position, and so the polynomial terms keep their existing meaning.
+  if (lidGy !== null) row.push(lidGy);
   return row;
 }
 
@@ -260,8 +275,8 @@ export function featureDegreeForAnchorCount(count: number): number {
 }
 
 /** How many free parameters per axis a given feature degree costs. */
-export function parameterCountForDegree(degree: number): number {
-  return buildFeatureRow(0, 0, degree).length;
+export function parameterCountForDegree(degree: number, usesLidCue = false): number {
+  return buildFeatureRow(0, 0, degree, usesLidCue ? 0 : null).length;
 }
 
 /**
@@ -274,9 +289,23 @@ export function parameterCountForDegree(degree: number): number {
  * point beyond the parameter count means each candidate is still overdetermined
  * with one anchor held out, and the number we choose on is real.
  */
-export function candidateDegrees(count: number): number[] {
-  const affordable = [1, 2, 3].filter(d => count - 1 >= parameterCountForDegree(d) + 1);
+export function candidateDegrees(count: number, usesLidCue = false): number[] {
+  const affordable = [1, 2, 3].filter(
+    d => count - 1 >= parameterCountForDegree(d, usesLidCue) + 1
+  );
   return affordable.length > 0 ? affordable : [1];
+}
+
+/**
+ * Median eyelid cue over a set of samples, or null if none of them carried one.
+ * Samples missing the cue are skipped rather than counted as zero, which would
+ * drag the median toward a value nobody measured.
+ */
+function medianLidGy(samples: Array<{ lidGy: number | null }>): number | null {
+  const present = samples
+    .map(s => s.lidGy)
+    .filter((v): v is number => v !== null && Number.isFinite(v));
+  return present.length > 0 ? median(present) : null;
 }
 
 function fitAxis(rows: number[][], targets: number[], lambda: number): number[] | null {
@@ -381,6 +410,7 @@ export class CalibrationEngine {
       yNorm,
       gx,
       gy,
+      lidGy: medianLidGy(kept),
       headYaw: median(kept.map(s => s.headYaw)),
       headPitch: median(kept.map(s => s.headPitch)),
       headTranslateX: median(kept.map(s => s.headTranslateX)),
@@ -431,7 +461,8 @@ export class CalibrationEngine {
       median(kept.map(s => s.headYaw)),
       median(kept.map(s => s.headPitch)),
       median(kept.map(s => s.headTranslateX)),
-      median(kept.map(s => s.headTranslateY))
+      median(kept.map(s => s.headTranslateY)),
+      medianLidGy(kept)
     );
 
     // Match the transform mapToScreen applies, so the correction lands exactly
@@ -529,7 +560,8 @@ export class CalibrationEngine {
         a.headYaw,
         a.headPitch,
         a.headTranslateX,
-        a.headTranslateY
+        a.headTranslateY,
+        a.lidGy
       );
       results.push({
         id: a.id,
@@ -920,7 +952,14 @@ export class CalibrationEngine {
       )
     );
 
-    const rawRows = compensated.map(c => buildFeatureRow(c.gx, c.gy, degree));
+    // The cue is only a column if every anchor has it. A column that is present
+    // for some anchors and absent for others would have to be filled in for the
+    // rest, and an invented value is indistinguishable from a measured one once
+    // it is in the matrix.
+    const usesLidCue = anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
+    const lidOf = (i: number) => (usesLidCue ? (anchors[i].lidGy as number) : null);
+
+    const rawRows = compensated.map((c, i) => buildFeatureRow(c.gx, c.gy, degree, lidOf(i)));
     const { mean: featureMean, std: featureStd } = standardiseColumns(rawRows);
     const rows = standardiseRows(rawRows, featureMean, featureStd);
 
@@ -948,6 +987,7 @@ export class CalibrationEngine {
       degree,
       reference,
       headGain: gain,
+      usesLidCue,
       weightsX,
       weightsY,
       featureMean,
@@ -1005,7 +1045,12 @@ export class CalibrationEngine {
     const ys = anchors.map(a => a.yNorm);
     const spanX = Math.max(...xs) - Math.min(...xs);
     const spanY = Math.max(...ys) - Math.min(...ys);
-    const coverage = Math.max(0, Math.min(1, spanX * spanY / 0.56));
+    // Against the full grid's own span, so a complete set-up reads 1.00 and
+    // anything less — a pruned point, a reduced working area — reads honestly
+    // below it. Tied to the grid rather than left at an older constant, which
+    // would have quietly reported 1.00 for every session once the grid widened.
+    const FULL_GRID_SPAN = 0.8 * 0.8;
+    const coverage = Math.max(0, Math.min(1, (spanX * spanY) / FULL_GRID_SPAN));
 
     return {
       crossValidatedErrorPx,
@@ -1023,7 +1068,8 @@ export class CalibrationEngine {
     yaw: number,
     pitch: number,
     tx: number,
-    ty: number
+    ty: number,
+    lidGy: number | null = null
   ): Point2D {
     const reference = regression.reference;
     const compensated = compensateForHead(
@@ -1034,7 +1080,17 @@ export class CalibrationEngine {
       regression.headGain
     );
 
-    const raw = buildFeatureRow(compensated.gx, compensated.gy, regression.degree);
+    // A model fitted with the cue needs a value for it on every prediction. If
+    // the cue drops out mid-session — a frame where the landmarker emits no
+    // blendshapes — the column falls back to the value it was centred on, which
+    // is the fitted mean, so the term contributes nothing rather than lurching.
+    const lidColumn = regression.usesLidCue
+      ? (lidGy !== null && Number.isFinite(lidGy)
+          ? lidGy
+          : regression.featureMean[regression.featureMean.length - 1])
+      : null;
+
+    const raw = buildFeatureRow(compensated.gx, compensated.gy, regression.degree, lidColumn);
     const standardised = raw.map((v, i) =>
       i === 0 ? 1 : (v - regression.featureMean[i]) / regression.featureStd[i]
     );
@@ -1079,6 +1135,7 @@ export class CalibrationEngine {
   public mapToScreen(
     gx: number,
     gy: number,
+    lidGy: number | null,
     headPose: HeadPose,
     screenWidth: number,
     screenHeight: number,
@@ -1095,7 +1152,8 @@ export class CalibrationEngine {
       headPose.yaw,
       headPose.pitch,
       headPose.translateX,
-      headPose.translateY
+      headPose.translateY,
+      lidGy
     );
 
     // Depth compensation.

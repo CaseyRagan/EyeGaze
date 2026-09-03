@@ -556,6 +556,7 @@ export class FaceMeshTracker {
     const mapped = calibrationEngine.mapToScreen(
       filteredFeature.x,
       filteredFeature.y,
+      features.lidGy,
       headPose,
       scrW,
       scrH,
@@ -698,6 +699,7 @@ export class FaceMeshTracker {
         {
           gx: filteredFeature.x,
           gy: filteredFeature.y,
+          lidGy: features.lidGy,
           headYaw: headPose.yaw,
           headPitch: headPose.pitch,
           headTranslateX: headPose.translateX,
@@ -868,6 +870,7 @@ export class FaceMeshTracker {
         {
           gx: gaze.gx,
           gy: gaze.gy,
+          lidGy: null,
           headYaw: 0,
           headPitch: 0,
           headTranslateX: 0,
