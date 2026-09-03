@@ -200,11 +200,18 @@ console.log('\n--- Reproducing the session ---');
 console.log(`replayed accuracy   ${asRun.meanDeg.toFixed(2)}°  (${asRun.meanPx.toFixed(0)} px)`);
 if (typeof reported === 'number') {
   const drift = Math.abs(asRun.meanDeg - reported);
+  // A difference means one of two things, and they are opposite in sign: either
+  // the recording is missing something the live run had, or the mapping has
+  // been changed since and the replay is showing what this session *would* have
+  // scored under the current code. The second is the entire point of keeping
+  // recordings, so it is not reported as a fault.
   console.log(
     `reported at the time ${reported.toFixed(2)}°  ` +
       (drift < 0.5
         ? '— matches, so the recording is complete'
-        : `— differs by ${drift.toFixed(2)}°, so something in the run is not captured`)
+        : drift > 0 && asRun.meanDeg < reported
+          ? `— ${drift.toFixed(2)}° better under the current mapping`
+          : `— ${drift.toFixed(2)}° worse under the current mapping`)
   );
 }
 
@@ -220,6 +227,20 @@ const variants: Variant[] = [
   { label: 'full quadratic (degree 3)', degree: 3 },
   { label: 'every sample, settled or not', rule: 'all' },
 ];
+
+/**
+ * How much head compensation this client's eyes actually wanted.
+ *
+ * When the movement pass fails to measure the gain, the nominal constants are
+ * applied at full strength on the reasoning that textbook anatomy is better than
+ * nothing. Whether that is true is an empirical question about a particular
+ * person, and it is answerable here: sweep the multiplier and see where the
+ * held-out error is lowest.
+ */
+const sweep: Variant[] = [-1, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.5, 2].map(k => ({
+  label: `head gain x${k}`,
+  headGain: { rotation: k, translation: k },
+}));
 
 console.log('\n--- Same samples, different model (scored on the check points) ---');
 let best = { label: '', deg: Infinity };
@@ -240,6 +261,17 @@ for (const variant of variants) {
   );
 }
 console.log(`\n  best here: ${best.label} at ${best.deg.toFixed(2)}°`);
+
+console.log('\n--- How much head compensation did these eyes want? ---');
+let bestGain = { k: '', deg: Infinity };
+for (const variant of sweep) {
+  const result = evaluate(variant);
+  if (!result) continue;
+  if (result.meanDeg < bestGain.deg) bestGain = { k: variant.label, deg: result.meanDeg };
+  const bar = '#'.repeat(Math.max(1, Math.round(result.meanDeg * 6)));
+  console.log(`  ${variant.label.padEnd(16)} ${result.meanDeg.toFixed(2)}°  ${bar}`);
+}
+console.log(`  → lowest at ${bestGain.k}`);
 
 // --- Did the head-movement pass contain any head movement? ------------------
 //

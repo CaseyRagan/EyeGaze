@@ -195,6 +195,12 @@ export interface CalibrationModel {
   isCalibrated: boolean;
   /** Person-specific multipliers on the head-compensation constants. */
   headGain?: { rotation: number; translation: number };
+  /**
+   * Whether those multipliers came from the head-movement pass rather than from
+   * the nominal fallback. Only a measured gain is trusted on a grid where head
+   * pose tracks the targets; see aliasTrust.
+   */
+  headGainMeasured?: boolean;
   lastCalibratedAt?: number;
   regression?: RegressionModel;
   quality?: CalibrationQuality;

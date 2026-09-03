@@ -306,6 +306,46 @@ Holding the target fixed while the head moves removes the ambiguity. Every bit
 of variation in the measurement is then head-driven, and a plain three-parameter
 regression recovers the coefficients directly.
 
+### An unmeasured gain must not be applied to an aliased grid
+
+The section above has always said the head gain cannot be *measured* from an
+ordinary calibration grid, because each screen position is seen at exactly one
+head pose and the two explanations for a moved eye are aliased. The corollary
+went unnoticed for much longer: it cannot safely be **applied** to that grid
+either.
+
+People turn their head toward whatever they are looking at. In a recorded
+session, head yaw against target x came back at **r = −0.87** — nearly as
+correlated with the target as the eye signal itself (r = +0.98). Subtracting a
+head term from the feature therefore subtracts most of the gaze signal with it,
+and the regression has to fight its own input to get back to where it started.
+
+Sweeping the multiplier on that recording, scored on the five check points the
+model never saw:
+
+| head gain | held-out error |
+|---|---|
+| ×0 | **4.32°** |
+| ×0.5 | 4.82° |
+| ×1 (nominal) | 5.27° |
+| ×2 | 6.04° |
+
+Monotonic. Compensation was costing a degree, and the more of it, the worse.
+
+The pose measurement is also noisier than the movement it is correcting for: on
+that session the within-dwell spread of head yaw was 0.19° against 0.27° of real
+drift across the grid — a signal-to-noise ratio of 1.46. Even without the
+aliasing there is not much there worth correcting.
+
+So compensation is now applied only to the extent it is trustworthy. Measured by
+the movement pass — which holds the target still and breaks the aliasing by
+construction — it is trusted in full. Unmeasured, on a grid where head pose
+tracks the targets, it is not applied at all. Unmeasured but on a grid where the
+head genuinely stayed put, it is applied, because there is nothing for it to be
+confused with. Nothing is lost in the case that matters: compensation exists for
+movement *after* set-up, and where the pose is aliased with the targets the
+regression has already absorbed that person's head behaviour into its weights.
+
 ### Rotation and translation cannot be separated from one movement
 
 The pass fits two constants: how much the eye counter-rotates per radian of head
@@ -529,6 +569,29 @@ This is a better trade than it first appears. Accuracy is much better near the
 centre than at the edges, so shrinking the area does not merely make targets
 smaller: it moves all of them into the part of the range the tracker handles
 well. A 70% working area takes a 32 degree half-angle down to 24.
+
+## Blinks, again: the tool was still announcing them
+
+The visual side of this was fixed a while ago and the reasoning below still
+stands. A tester reported months later that it *still* felt like the tracker lost
+everything on a blink — and it did, in the two places nobody had looked.
+
+**A sound played on every blink.** A 600 Hz tone dropping to 180 Hz, on every
+closure. At fifteen blinks a minute that is an alarm going off every four
+seconds, telling the client that an involuntary reflex is a problem. Nothing
+consumed the event; the callback existed only to make the noise. The blink count
+is kept, because blink rate is a real clinical measure, but counting is not
+announcing.
+
+**The status readout flipped to "Blink".** The estimate is *held* through a
+blink rather than lost, so the honest label during one is the label it already
+had. An interruption long enough to be something other than a blink still reads
+as "Holding".
+
+The lesson worth keeping: the code had the right intent written into its own
+comments, and two channels the comments did not mention went on contradicting
+it. A claim that blinks are handled silently is only as good as an audit of
+every channel that can speak.
 
 ## Blinks
 

@@ -134,6 +134,14 @@ const MIN_TRANSLATION_SPREAD = 0.006;
  */
 const MAX_SEPARABLE_CORRELATION = 0.9;
 
+/**
+ * How strongly head pose has to track the targets before the compensation stops
+ * being applied. Below the first figure the two are separable enough to trust;
+ * above the second they are the same measurement wearing different labels.
+ */
+const ALIAS_SAFE = 0.4;
+const ALIAS_BLIND = 0.75;
+
 
 
 export interface CalibrationPointSpec {
@@ -609,6 +617,7 @@ export class CalibrationEngine {
    */
   public setHeadGain(gain: HeadGain) {
     this.model.headGain = gain;
+    this.model.headGainMeasured = true;
     this.refit();
   }
 
@@ -659,6 +668,52 @@ export class CalibrationEngine {
     return best;
   }
 
+  /**
+   * How much of the nominal head compensation is safe to apply.
+   *
+   * The docs have long said the head gain cannot be *measured* from an ordinary
+   * calibration grid, because each screen position is seen at exactly one head
+   * pose and the two explanations for a moved eye are aliased. The corollary went
+   * unnoticed for far longer: it cannot safely be *applied* to that grid either.
+   *
+   * People turn their head toward whatever they look at. In a recorded session,
+   * head yaw against target x came back at r = -0.87 — so subtracting a head
+   * term from the feature subtracts most of the gaze signal along with it, and
+   * the regression has to fight its own input to get back to where it started.
+   * Sweeping the multiplier on that session, held-out error rose monotonically
+   * with every increase: 4.32° with no compensation, 5.27° at full nominal
+   * strength. Compensation was costing a degree.
+   *
+   * So the compensation is only applied to the extent it is trustworthy:
+   *
+   * - measured by the head-movement pass, which holds the target still and
+   *   therefore breaks the aliasing by construction — trusted in full;
+   * - not measured, and the grid shows head pose tracking the target — not
+   *   applied, because it cannot be told apart from the thing being fitted;
+   * - not measured, but the head genuinely stayed put relative to the targets —
+   *   applied, since there is nothing for it to be confused with.
+   *
+   * Nothing is lost in the case that matters. Head compensation exists for
+   * movement *after* set-up, and when the pose is aliased with the targets the
+   * regression has already absorbed that person's head behaviour into its own
+   * weights.
+   */
+  private aliasTrust(anchors: CalibrationAnchor[]): number {
+    if (this.model.headGainMeasured) return 1;
+    if (anchors.length < 5) return 0;
+
+    const worst = Math.max(
+      Math.abs(correlation(anchors.map(a => a.headYaw), anchors.map(a => a.xNorm))),
+      Math.abs(correlation(anchors.map(a => a.headPitch), anchors.map(a => a.yNorm)))
+    );
+
+    // Fades out rather than switching, so a grid that is only mildly aliased
+    // still gets most of the compensation it deserves.
+    if (worst <= ALIAS_SAFE) return 1;
+    if (worst >= ALIAS_BLIND) return 0;
+    return (ALIAS_BLIND - worst) / (ALIAS_BLIND - ALIAS_SAFE);
+  }
+
   private fitRegression(anchors: CalibrationAnchor[], degree: number): RegressionModel | null {
     // The reference posture is the average head position across the anchors, so
     // compensation is zero at the posture the client actually calibrated in and
@@ -670,7 +725,14 @@ export class CalibrationEngine {
       translateY: median(anchors.map(a => a.headTranslateY)),
     };
 
-    return this.fitWithGain(anchors, degree, reference, this.model.headGain ?? NOMINAL_HEAD_GAIN);
+    const raw = this.model.headGain ?? NOMINAL_HEAD_GAIN;
+    const trust = this.aliasTrust(anchors);
+    const effective: HeadGain = {
+      rotation: raw.rotation * trust,
+      translation: raw.translation * trust,
+    };
+
+    return this.fitWithGain(anchors, degree, reference, effective);
   }
 
   /**
@@ -775,6 +837,9 @@ export class CalibrationEngine {
     };
 
     this.model.headGain = gain;
+    // Exactly nominal on both axes is the fallback, not a measurement, and a
+    // fallback must not buy the trust that breaking the aliasing earns.
+    this.model.headGainMeasured = gain.rotation !== 1 || gain.translation !== 1;
     this.refit();
     return gain;
   }

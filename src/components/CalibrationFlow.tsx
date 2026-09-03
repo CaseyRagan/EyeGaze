@@ -209,6 +209,22 @@ const ARRIVAL_GRACE_MS = 2000;
 const HEAD_PASS_SETTLE_MS = 900;
 /** Floor, so the ring cannot be filled and gone before it has been understood. */
 const HEAD_PASS_MIN_MS = 2500;
+/**
+ * And a floor on evidence, not just on time.
+ *
+ * Ending the pass the moment the ring filled turned out to punish exactly the
+ * clients who did it well: a recorded session shows someone sweeping 34.8° of
+ * yaw and 23.3° of pitch, filling all four arcs — and handing the fit only 76
+ * samples, because brisk movement completes the ring in the two and a half
+ * seconds the floor allowed. The gain fit needs 25 usable samples and discards
+ * frames whose tracking quality drops, which large head turns cause plenty of,
+ * so a fast sweep could clear the ring and still starve the measurement. It then
+ * reported failure, and the run got the nominal constants.
+ *
+ * Five seconds of frames is the floor now. The ring still says when there has
+ * been enough *movement*; this says when there has been enough *evidence*.
+ */
+const HEAD_PASS_MIN_SAMPLES = 150;
 /** Ceiling, so a client who cannot complete the ring is never trapped by it. */
 const HEAD_PASS_MAX_MS = 20000;
 
@@ -645,9 +661,10 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       }
 
       const moving = elapsed - HEAD_PASS_SETTLE_MS;
-      const done =
-        (coverageComplete(headCoverageRef.current) && moving >= HEAD_PASS_MIN_MS) ||
-        moving >= HEAD_PASS_MAX_MS;
+      const enoughMovement = coverageComplete(headCoverageRef.current);
+      const enoughEvidence =
+        moving >= HEAD_PASS_MIN_MS && samplesRef.current.length >= HEAD_PASS_MIN_SAMPLES;
+      const done = (enoughMovement && enoughEvidence) || moving >= HEAD_PASS_MAX_MS;
 
       if (done) {
         const gain = calibrationEngine.fitHeadGainFromMotionPass(samplesRef.current);
@@ -1393,7 +1410,7 @@ const HeadPassStage: React.FC<{
 
       {collecting && (
         <p className="text-lg font-medium text-sage-600 h-7">
-          {next ? DIRECTION_PROMPT[next] : 'That is it — hold still'}
+          {next ? DIRECTION_PROMPT[next] : 'Keep moving gently for a moment'}
         </p>
       )}
     </div>
