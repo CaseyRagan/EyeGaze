@@ -1046,6 +1046,85 @@ Everything keyed off fixation flinched with it: the pointer shrank, the fixation
 centre was discarded, and a dwell in progress read as momentarily lost. The eyes
 were never lost. Only the label was, and the label was driving the display.
 
+## The cue was wrong, and the guard that was meant to catch it chose it
+
+Two more sessions a few minutes apart, one with the laptop flat on the desk and
+one raised to eye level, replayed with the cue and without:
+
+| | held-out check points | | leave-one-out on the anchors | |
+|---|---|---|---|---|
+| | with cue | without | with cue | without |
+| camera on the desk | 8.56° | **4.22°** | **162 px** | 275 px |
+| camera at eye level | 3.41° | **2.86°** | **143 px** | 264 px |
+
+The check points say the cue costs 4.34° and 0.55°. Leave-one-out says it saves
+113 px and 121 px. It is not that cross-validation was insensitive to this
+failure — it is confidently, consistently **anti-correlated** with it.
+
+The reason is that the nine anchors are not nine independent observations. They
+come from one continuous minute, sharing a posture, a lighting condition and the
+same lid contamination. Holding one out and predicting it from its eight
+neighbours rewards exactly the extra flexibility that does not survive to a check
+taken a minute later. The validation points are the only genuinely held-out data
+in the session, and they were saying the opposite.
+
+So the eyelid cue is off. Not gated, not weighted down — off, as a constant
+rather than a setting, because there is no in-app evidence that could justify
+switching it on: the only selector available prefers it precisely when it is
+worst. The feature extraction, the recording and the replay variant all stay,
+since that is what would produce such evidence. `bun run replay <file>` scores
+every session both ways.
+
+It is worth being clear about how this got shipped. The cue was validated on a
+synthetic eye whose lid model was fitted to two real sensitivity ratios, and it
+looked convincing — vertical reach 30% to 85%, cross-validated error 260 px to
+100 px. What that eye did not have was a *realistically bad cue*: the synthetic
+`eyeLookUp`/`eyeLookDown` signal was clean, and MediaPipe's is not. A synthetic
+test can only ever be as honest as its worst-modelled component, and the
+component that mattered was the one invented rather than measured.
+
+The camera height result is a consequence rather than a separate finding: a
+camera below eye level sees more eyelid, and this cue is read from the eye
+region. That is why the desk run was the catastrophic one, and why camera height
+mattered far more after the cue shipped than before it. Without the cue the gap
+is 4.22° against 2.86° — real, worth sitting up for, and not the six degrees it
+had become.
+
+## Capture order and screen row were the same variable
+
+In every recorded session, the correlation between the order the dots were
+captured in and their vertical position on screen is **+0.95**. The grid was
+listed left to right, top to bottom, and captured that way.
+
+That makes anything that drifts over the minute of set-up indistinguishable from
+a genuine effect of looking up or down. Head pitch is exactly such a thing:
+
+| session | corr(capture order, pitch) | corr(row, pitch) | drift across the grid |
+|---|---|---|---|
+| camera on the desk | −0.82 | −0.91 | −0.8° |
+| camera at eye level | +0.47 | +0.23 | +0.9° |
+| earlier session | +0.87 | +0.71 | +1.5° |
+
+The sign flips between sessions. That is the whole argument: if this were a real
+property of looking up versus down it would point the same way every time.
+Instead, whatever the client's neck happened to do during that particular minute
+was being fitted into the vertical mapping as though it were gaze — which is the
+same aliasing problem already documented for the head-movement pass, arriving
+through a different door.
+
+The fix costs nothing. Each row is now captured early, in the middle, and late:
+in the nine-point grid the middle row takes positions 0, 4 and 8, the top row
+1, 5 and 6, and the bottom row 2, 3 and 7, so every row averages position 4 and
+the columns balance the same way. Order-versus-row correlation drops from +0.95
+to 0.00 on all three grids, asserted as a property in the check rather than
+eyeballed, since one transposed pair would restore the confound silently.
+
+The centre goes first, which was the user's own suggestion and is right for a
+second reason: it is the one target that asks for no eccentric gaze at all, so
+it is captured while the client is still square on, and it is the anchor the
+whole mapping pivots around. Consecutive points also end up far apart, which
+makes each move a real saccade rather than a drift along a row.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five

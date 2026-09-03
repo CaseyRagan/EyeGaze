@@ -26,6 +26,53 @@ import { viewingGeometry } from './viewingGeometry';
 // could detect, so old ones are dropped rather than loaded.
 const STORAGE_KEY = 'gazeflow_calibration_v6';
 
+/**
+ * Whether the eyelid vertical cue may enter the mapping. It may not.
+ *
+ * The cue was added because the iris feature's vertical range collapses when the
+ * upper lid covers the top of the iris, and on a synthetic eye tuned to a real
+ * session's measured sensitivity ratios it recovered that range convincingly —
+ * vertical reach 30% to 85%, cross-validated error 260px to 100px.
+ *
+ * On real faces it made things worse, twice, at two camera heights. Scored on
+ * check points the model was never fitted on:
+ *
+ *   camera on the desk    with the cue 8.56°   without 4.22°
+ *   camera at eye level   with the cue 3.41°   without 2.86°
+ *
+ * The lower camera is much the worse case, which fits the mechanism: a camera
+ * below eye level sees more eyelid, and this cue is read from the eye region.
+ *
+ * The reason it is a hard-off rather than a guarded option is the second half of
+ * that measurement. Leave-one-out — the selector built specifically to refuse a
+ * cue that was not earning its place — preferred the cue in both sessions, and
+ * not narrowly: 162px against 275px, and 143px against 264px. It is not merely
+ * insensitive to this failure, it is anti-correlated with it. Nine anchors from
+ * one continuous minute share their posture drift and their lid contamination,
+ * so holding one out and predicting it from its neighbours rewards exactly the
+ * extra freedom that does not survive to the check a minute later.
+ *
+ * So there is currently no in-app evidence that could justify switching this on,
+ * which is why it is a constant and not a setting. The feature extraction, the
+ * recording and the replay variant all stay, because that is what would produce
+ * such evidence: `bun run replay <file>` scores every session both ways.
+ */
+let EYELID_CUE_ENABLED = false;
+
+/**
+ * Switches the cue on for the offline harnesses only — the check scenario that
+ * proves the mechanism still works, and the replay variant that scores a real
+ * session both ways. Nothing in the app calls this.
+ */
+export function setEyelidCueEnabled(enabled: boolean) {
+  EYELID_CUE_ENABLED = enabled;
+}
+
+/** Whether the eyelid cue is currently allowed into the mapping. */
+export function isEyelidCueEnabled(): boolean {
+  return EYELID_CUE_ENABLED;
+}
+
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
 
@@ -209,6 +256,48 @@ export const PRECISION_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 70 },
   { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 70 },
 ];
+
+/**
+ * The order the dots are shown in, which is not the order they are listed in.
+ *
+ * Listed spatially — left to right, top to bottom — they were also *captured*
+ * that way, and in every recorded session the capture order and the screen row
+ * correlate at +0.95. That makes the passage of time and the vertical position
+ * of the target very nearly the same variable, and anything that drifts over
+ * the minute of set-up is then indistinguishable from a genuine effect of
+ * looking up or down. Head pitch is exactly such a thing: measured across three
+ * sessions it correlated with capture order at -0.82, +0.47 and +0.87 — and the
+ * sign flips, which is how you know it is posture drift rather than physics.
+ * Whatever the client's neck happened to do that minute was being fitted into
+ * the vertical mapping as though it were gaze.
+ *
+ * So each row appears early, in the middle, and late. For the nine-point grid
+ * the middle row takes positions 0, 4 and 8, the top row 1, 5 and 6, the bottom
+ * row 2, 3 and 7 — every row averaging position 4, and the columns balanced the
+ * same way. A steady drift in any direction now averages out of every row
+ * equally instead of tilting the mapping.
+ *
+ * The centre goes first for a second reason: it is the one target that asks for
+ * no eccentric gaze at all, so it is captured while the client is still square
+ * on, and it is the anchor the whole mapping pivots around. Consecutive points
+ * are also far apart, which makes each move a real saccade rather than a drift
+ * along a row.
+ */
+const CAPTURE_ORDER: Record<number, number[]> = {
+  5: [3, 1, 5, 4, 2],
+  9: [5, 3, 7, 9, 4, 2, 1, 8, 6],
+  13: [5, 3, 7, 13, 10, 9, 4, 1, 11, 12, 2, 8, 6],
+};
+
+/** The grid, resequenced for capture. Unknown sizes are left alone. */
+export function inCaptureOrder(targets: CalibrationPointSpec[]): CalibrationPointSpec[] {
+  const order = CAPTURE_ORDER[targets.length];
+  if (!order) return targets;
+  const byId = new Map(targets.map(t => [t.id, t]));
+  const ordered = order.map(id => byId.get(id)).filter((t): t is CalibrationPointSpec => !!t);
+  // A mismatch between the table and the grid must not silently drop a point.
+  return ordered.length === targets.length ? ordered : targets;
+}
 
 /**
  * Validation points deliberately sit *between* the calibration points. Measuring
@@ -711,7 +800,8 @@ export class CalibrationEngine {
   }
 
   private selectModelShape(anchors: CalibrationAnchor[]): { degree: number; useLidCue: boolean } {
-    const hasCue = anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
+    const hasCue =
+      EYELID_CUE_ENABLED && anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
     const shapes: Array<{ degree: number; useLidCue: boolean }> = [];
     for (const degree of candidateDegrees(anchors.length)) {
       shapes.push({ degree, useLidCue: false });

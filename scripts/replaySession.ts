@@ -36,7 +36,7 @@ const store = new Map<string, string>();
 };
 (globalThis as any).navigator = { userAgent: 'replay' };
 
-const { CalibrationEngine } = await import('../src/services/calibration');
+const { CalibrationEngine, setEyelidCueEnabled } = await import('../src/services/calibration');
 const { viewingGeometry } = await import('../src/services/viewingGeometry');
 
 const path = process.argv[2];
@@ -119,16 +119,21 @@ interface Variant {
   degree?: number | null;
   headGain?: { rotationX: number; rotationY: number; translation: number } | null;
   stripResiduals?: boolean;
-  /** Fit and score with the eyelid vertical cue withheld. */
-  withoutLidCue?: boolean;
+  /**
+   * Fit and score with the eyelid vertical cue allowed in. It is off in the app
+   * — two recorded sessions measured it doing harm — so this is the variant that
+   * would have to start winning, on real recordings, before that is revisited.
+   */
+  withLidCue?: boolean;
 }
 
 function evaluate(variant: Variant) {
   const engine = new CalibrationEngine();
   engine.reset();
 
+  setEyelidCueEnabled(variant.withLidCue === true);
   const strip = (samples: any[]) =>
-    variant.withoutLidCue ? samples.map(s => ({ ...s, lidGy: null })) : samples;
+    variant.withLidCue ? samples : samples.map(s => ({ ...s, lidGy: null }));
 
   for (const point of capture) {
     const samples = strip(samplesFor(point, variant.rule ?? 'settled'));
@@ -245,7 +250,7 @@ const variants: Variant[] = [
   { label: 'with cross term (degree 2)', degree: 2 },
   { label: 'full quadratic (degree 3)', degree: 3 },
   { label: 'every sample, settled or not', rule: 'all' },
-  { label: 'without the eyelid cue', withoutLidCue: true },
+  { label: 'with the eyelid cue', withLidCue: true },
 ];
 
 /**
