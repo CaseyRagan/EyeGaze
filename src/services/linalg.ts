@@ -121,6 +121,28 @@ export function standardDeviation(values: number[]): number {
 }
 
 /**
+ * Pearson correlation. Returns 0 when either channel is flat, because an axis
+ * that never moved is not correlated with anything — it is simply absent.
+ */
+export function correlation(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length < 2) return 0;
+  const meanA = mean(a);
+  const meanB = mean(b);
+  let cov = 0;
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const da = a[i] - meanA;
+    const db = b[i] - meanB;
+    cov += da * db;
+    varA += da * da;
+    varB += db * db;
+  }
+  if (varA < 1e-12 || varB < 1e-12) return 0;
+  return cov / Math.sqrt(varA * varB);
+}
+
+/**
  * Drops samples further than `threshold` MADs from the median on any of the
  * supplied channels, then returns the surviving indices. Falls back to keeping
  * everything if rejection would leave too little data to work with.

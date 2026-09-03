@@ -460,7 +460,15 @@ export class FaceMeshTracker {
 
   private processFrame(landmarks: any[], blendshapes: Record<string, number>, matrix?: Float32Array | number[]) {
     const now = Date.now();
-    const extracted = extractGazeFeatures(landmarks, blendshapes, matrix);
+    // The extractor cannot know the shape of the image it is measuring, and its
+    // landmarks are normalised per axis, so the aspect ratio has to travel with
+    // them or every length it computes is stretched vertically.
+    const video = this.videoElement;
+    const aspect =
+      video && video.videoWidth > 0 && video.videoHeight > 0
+        ? video.videoWidth / video.videoHeight
+        : undefined;
+    const extracted = extractGazeFeatures(landmarks, blendshapes, matrix, aspect);
     if (!extracted) {
       this.emitLost();
       return;
@@ -482,7 +490,14 @@ export class FaceMeshTracker {
         this.blinkCount++;
         this.lastBlinkTime = now;
         this.callbacks.onBlink?.('both');
-        soundEngine.playBlinkClick();
+        // No sound. This used to play a descending click on every blink, which
+        // at fifteen blinks a minute is an alarm going off every four seconds
+        // telling the client that an involuntary reflex was a problem. The
+        // visual side of exactly this was fixed a while ago — the pointer stops
+        // dimming, the trail stops dropping — and the audio was missed, which is
+        // why the tool still *felt* like it lost tracking on every blink even
+        // though it had long since stopped doing so. The count is kept: blink
+        // rate is a real clinical measure, and counting is not announcing.
       }
     } else if (!blinkingBoth && this.lastBlinkBoth) {
       this.lastBlinkEndTime = now;

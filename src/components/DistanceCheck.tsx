@@ -18,7 +18,7 @@ export const DistanceCheck: React.FC<{ onChanged?: () => void }> = ({ onChanged 
 
   const measured = viewingGeometry.getMeasuredDistanceCm();
   const agreement = viewingGeometry.getMeasurementAgreement();
-  const reliable = viewingGeometry.isDistanceMeasured();
+  const confidence = viewingGeometry.getDistanceConfidence();
 
   const apply = () => {
     const value = Number(entry);
@@ -40,10 +40,17 @@ export const DistanceCheck: React.FC<{ onChanged?: () => void }> = ({ onChanged 
         </span>
       </div>
 
-      {!reliable && measured !== null && (
+      {/*
+        Disagreement no longer means the reading is thrown away — a placeholder
+        nobody chose is not more trustworthy than a real measurement, it is just
+        quieter about being wrong. It means the two rulers describe different
+        anatomy, and one tape measure settles it for good.
+      */}
+      {confidence === 'uncertain' && (
         <p className="text-xs text-honey-700 leading-relaxed">
-          The two estimates disagree{agreement > 0 ? ` (${Math.round(agreement * 100)}% agreement)` : ''}, so
-          the setting above is being used instead. Correcting it below will fix that.
+          The two ways of measuring this disagree
+          {agreement > 0 ? ` (${Math.round(agreement * 100)}% agreement)` : ''}, so treat the figure as
+          approximate. One tape measure below fixes it permanently.
         </p>
       )}
 

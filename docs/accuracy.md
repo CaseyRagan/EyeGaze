@@ -3,6 +3,151 @@
 This is the reasoning behind the tracking pipeline, and the honest answer to
 "how accurate can this get, and would a head frame help?"
 
+## The two image axes were never in the same unit
+
+This one sat underneath everything else for the whole project, and none of the
+existing checks could see it, because they all started from synthetic *features*
+and tested the mapping built on top of them. The step underneath — landmarks into
+features — had no test at all.
+
+MediaPipe normalises landmark `x` by the image width and `y` by the image height.
+On a 1280x720 camera one vertical unit is therefore **1.778 horizontal units**.
+Every length in `gazeFeatures.ts` was computed with `hypot` across those two axes
+as though they were the same: the iris radius, the eye width, the distance
+between the eyes, the eyelid aperture.
+
+`scripts/geometryCheck.ts` builds a face of known size at a known distance,
+projects it through a pinhole camera into an image of a known shape, normalises
+the result the way MediaPipe does, and asks the extractor what it sees. Before
+the fix:
+
+| measurement | truth | reported |
+|---|---|---|
+| distance | 40 / 50 / 60 cm | 28.8 / 36.0 / 43.2 cm — **0.720x**, at every distance |
+| head roll | 7° | 12.3° |
+| head roll | 15° | 25.5° |
+| vertical vs horizontal gaze sensitivity | 1.000 | **1.778** — exactly the aspect ratio |
+| horizontal estimate while rolling the head 15° | no movement | 3.9% of the screen |
+
+After: 1.000x at every distance, roll exact, sensitivity ratio 1.000, and the
+roll drift down to 0.9%.
+
+What it was costing:
+
+- **Every figure quoted in degrees**, because they all scale with the viewing
+  distance, and the iris ruler was reading 28% short. So was the advice about
+  where to sit — "aim for 45 cm" was seating people at about 62.
+- **Vertical head compensation.** The constant is derived from the image width,
+  but it was being applied to a vertical feature inflated by 1.778, so the pitch
+  term was under-applied by that factor.
+- **Anyone who tilts their head.** The eye basis is built from the line between
+  the eyes; in a stretched space it over-rotates, and the horizontal estimate
+  drifts with a pose nothing downstream is told about.
+- **The blink thresholds**, which are an aperture-to-width ratio. They were tuned
+  by eye on a 16:9 camera with that camera's stretch baked in, so they quietly
+  meant something different on a 4:3 webcam. They are now divided through by it.
+
+Because the gaze features changed meaning, the stored calibration key moved to
+`v4`: a model fitted before this is wrong in a way nothing downstream could
+detect, so old ones are dropped rather than loaded.
+
+## Knowing how big the screen is, without asking
+
+Every figure reported in degrees is scaled by the physical size of the screen,
+and the browser will not tell you it — CSS "inches" are defined as 96 CSS pixels
+and have nothing to do with the glass. So it was a number in settings, which
+people reasonably forgot to set until after they had already calibrated. A wrong
+one is invisible: it rescales every accuracy figure without anything looking
+broken.
+
+Two things are available instead of asking.
+
+**The panel's own resolution.** `screen.width * devicePixelRatio` is the native
+panel resolution, and for the machines this tool runs on — laptops and tablets —
+that identifies the panel, because manufacturers ship a small number of
+distinctive ones. 3024x1964 is a 14-inch MacBook Pro and nothing else. The table
+in `screenSize.ts` is deliberately Apple-heavy: those panels identify exactly. A
+Windows laptop at 1920x1080 is deliberately *absent*, because that resolution
+spans 13 to 17 inches and a guess there would be worse than admitting the guess.
+
+**A bank card.** ID-1 is 85.60 x 53.98 mm by international standard, so a card
+held against an on-screen rectangle the user drags to match measures the screen
+directly. That is exact rather than inferred, and it is what the unknown panels
+get. It also measures millimetres per pixel, which is the quantity everything
+downstream actually wants — the diagonal is only a proxy for it.
+
+The card is also where the figure now lives in the *set-up flow*, next to the
+distance check, rather than only in settings. The failure being prevented is one
+of timing, and no amount of detection helps the panel it cannot recognise.
+
+Worth stating plainly, because it reads worse than it is: **the calibration does
+not depend on this.** Targets are placed as fractions of the window and the model
+is fitted in those fractions, so a wrong screen size produces a wrong *number*,
+not a wrong mapping. Correcting it afterwards re-reports the same session
+correctly.
+
+## A disagreement is not a reason to use a number nobody chose
+
+The viewing distance is estimated two ways, and when they disagreed by enough the
+code fell back to `assumedDistanceCm` — a fixed 55 cm from settings. The
+reasoning was that a measurement the app cannot vouch for is worse than a
+default. It is not. The default is a number nobody chose, and substituting it
+means a client who really is at 40 cm has every figure rescaled by a third with
+no indication anything happened.
+
+Disagreement is real information, but it is information about *how much* to trust
+the figure, not about whether to use it — so it is reported as confidence
+(`good` / `uncertain` / `assumed`) and the interface asks for one tape measure.
+
+This surfaced immediately after the aspect-ratio fix. The two estimates used to
+agree at 0.87, which looked reassuring; with the iris ruler corrected they fell
+to 0.38, which looks worse and is more honest. Their ratio is independent of the
+assumed field of view — both scale with focal length identically — so a stable
+disagreement is telling us the person's anatomy differs from the assumed
+constants, not that the measurement failed.
+
+## Keeping the samples, not just the conclusions
+
+Everything else this app reports is a summary — an accuracy figure, a
+cross-validated error, five per-point numbers. A summary is enough to know a
+session went badly and never enough to know why. Four disappointing runs in a row
+produced four different signatures, each diagnosed by inference from about five
+aggregate numbers, which is guessing with extra steps.
+
+A session can now be saved from the result screen. It contains every sample that
+went into every calibration point — not the accepted subset, the whole window,
+because which samples *should* have been accepted is one of the things worth
+re-deciding later — along with whether each was judged settled at the time, when
+it arrived, the head pose it was taken at, the head-movement pass, and the fitted
+model including its residuals. About 130 KB for a nine-point session. It stays on
+the machine unless someone sends it.
+
+`bun run replay <file>` is the other half, and without it the file is just data.
+It rebuilds the calibration from the recorded samples, reproduces the accuracy
+figure the client was shown — which is the check that the recording is complete
+enough to reason from — and then refits the *same* samples under variations,
+scoring each on the check points no variant was fitted on:
+
+```
+--- Same samples, different model (scored on the check points) ---
+  as it ran                          0.36°  (15 px)   loo 63 px   terms 1
+  no head compensation               0.36°  (15 px)   loo 63 px   terms 1
+  global fit only (no local term)    0.59°  (24 px)   loo 63 px   terms 1
+  every sample, settled or not       0.40°  (16 px)   loo 62 px   terms 1
+```
+
+It also answers, directly, two questions that were previously guessed at: whether
+the head-movement pass contained any head movement (it reports the yaw and pitch
+actually swept, so a pass that "succeeded" while measuring nothing says so), and
+how far the head drifted between teaching the model and checking it — the one
+failure where the grid is internally consistent, the check is internally
+consistent, and they describe two different head positions.
+
+The point is that a change to the mapping can now be argued from a real client's
+eyes rather than from synthetic data and a plausible story. Every number above is
+measured on held-out points, so a variation that fits the grid better and the
+check worse is one that has learned the grid, and the table says so.
+
 ## What limits accuracy
 
 The error you actually experience is the sum of four things. They are listed in
@@ -160,6 +305,137 @@ aliased. No amount of cleverness separates them from that data.
 Holding the target fixed while the head moves removes the ambiguity. Every bit
 of variation in the measurement is then head-driven, and a plain three-parameter
 regression recovers the coefficients directly.
+
+### The head was turning the wrong way
+
+The landmarks are mirrored, so the picture matches what the client sees and
+"looked to the right" means the irises moved right. MediaPipe's transformation
+matrix is **not** mirrored — it arrives in the camera's own frame. Head yaw taken
+straight from that matrix therefore pointed the opposite way to every quantity it
+was combined with.
+
+Nothing catches that by inspection, and downstream it does not look like a sign
+error. It looks like head compensation making accuracy worse, and like the pass
+that measures how much to apply returning a negative number that gets rejected
+for being out of range. Both of those were happening, for months.
+
+Two recorded sessions proved it without any appeal to matrix conventions.
+Turning your head left rotates you left *and* slides your eyes left, because the
+pivot is your neck — so in one consistent frame those must move together:
+
+| | yaw vs sideways travel | pitch vs vertical travel |
+|---|---|---|
+| session 1 | **−0.98** | +0.99 |
+| session 2 | **−0.99** | +0.99 |
+
+A horizontal mirror negates rotation about the vertical axis (yaw) and about the
+view axis (roll), and leaves rotation about the horizontal axis (pitch) alone.
+That is exactly the pattern. `scripts/geometryCheck.ts` now builds a yawed head
+with matching landmarks and matrix and requires the two to agree; it failed
+before the fix and passes after.
+
+The clearest confirmation is in the shape of the curve. Sweeping the
+compensation multiplier against held-out error, *before* the fix both sessions
+fell monotonically all the way to the most negative value tried — the signature
+of a term pointing the wrong way. After it, both have an interior minimum, which
+is what a real physical parameter looks like.
+
+### One bad axis was destroying a good one
+
+Even with the sign right, the gain fit kept failing. The horizontal and vertical
+estimates are separate measurements of very different quality — horizontal is
+easy, because the eye sweeps a wide arc with the iris fully visible; vertical is
+not, because the lid covers the iris as the eye rolls. On one session horizontal
+came back at 0.65, perfectly plausible, and vertical at −0.25, which is not a
+person but a failed measurement. Their weighted mean was 0.20, below the
+plausible floor, so the entire pass was written off.
+
+An implausible estimate is now discarded as a failure on that axis rather than
+folded into the answer for the other. Both recorded sessions now measure a gain
+of 0.65 and 0.68 — two independent measurements of the same person agreeing, at
+about two thirds of the textbook constant.
+
+### An unmeasured gain must not be applied to an aliased grid
+
+The section above has always said the head gain cannot be *measured* from an
+ordinary calibration grid, because each screen position is seen at exactly one
+head pose and the two explanations for a moved eye are aliased. The corollary
+went unnoticed for much longer: it cannot safely be **applied** to that grid
+either.
+
+People turn their head toward whatever they are looking at. In a recorded
+session, head yaw against target x came back at **r = −0.87** — nearly as
+correlated with the target as the eye signal itself (r = +0.98). Subtracting a
+head term from the feature therefore subtracts most of the gaze signal with it,
+and the regression has to fight its own input to get back to where it started.
+
+Sweeping the multiplier on that recording, scored on the five check points the
+model never saw:
+
+| head gain | held-out error |
+|---|---|
+| ×0 | **4.32°** |
+| ×0.5 | 4.82° |
+| ×1 (nominal) | 5.27° |
+| ×2 | 6.04° |
+
+Monotonic. Compensation was costing a degree, and the more of it, the worse.
+
+**That sweep was measured with the head turning the wrong way**, and the section
+above explains why. With the sign corrected the curve has an interior minimum
+and compensation is roughly a wash across the two sessions — it helps one by
+0.43° and costs the other the same. The reasoning below still stands as the
+right default when the gain *cannot* be measured, which is the only case it now
+applies to; it is no longer the whole story it briefly appeared to be.
+
+The pose measurement is also noisier than the movement it is correcting for: on
+that session the within-dwell spread of head yaw was 0.19° against 0.27° of real
+drift across the grid — a signal-to-noise ratio of 1.46. Even without the
+aliasing there is not much there worth correcting.
+
+So compensation is now applied only to the extent it is trustworthy. Measured by
+the movement pass — which holds the target still and breaks the aliasing by
+construction — it is trusted in full. Unmeasured, on a grid where head pose
+tracks the targets, it is not applied at all. Unmeasured but on a grid where the
+head genuinely stayed put, it is applied, because there is nothing for it to be
+confused with. Nothing is lost in the case that matters: compensation exists for
+movement *after* set-up, and where the pose is aliased with the targets the
+regression has already absorbed that person's head behaviour into its weights.
+
+### Rotation and translation cannot be separated from one movement
+
+The pass fits two constants: how much the eye counter-rotates per radian of head
+turn, and how much per unit of sideways head travel. It could not have been
+measuring both, because **you rotate about your neck, not about your eyeballs**.
+Turning your head by dθ also slides your eyes sideways by roughly 10 cm · dθ, so
+the two regressors arrive almost perfectly correlated. Working the constants
+through, the rotation term carries about **eight times** the leverage of the
+translation term, so least squares can trade a small change in one against a
+large change in the other at almost no cost in residual. The split it returns is
+arbitrary, and it is then applied to every prediction afterwards.
+
+A field report showed exactly that: rotation pushed outside its plausible range
+and silently replaced by the fallback, translation left at 0.507, and the
+accuracy check afterwards 2.4x worse than the calibration grid it was fitted on.
+
+The old regression check could not catch it, because it drove the pass with
+`yaw: 0.08·sin(phase)` against `translateX: 0.022·cos(0.9·phase)` — sine against
+cosine at different frequencies, i.e. deliberately decorrelated. A head that
+rotates and translates independently. No neck does that.
+
+Now the fit measures the correlation first and declines to split what moved
+together, fitting the rotation term alone and leaving translation nominal. That
+is a worse model of a pure sideways slide than a good split would be, and a far
+better one than a split invented from collinear data. Measured on the movement
+that fills the ring:
+
+| movement | rotation | translation |
+|---|---|---|
+| turn and nod only | 1.42 (the combined truth) | 1.00 — declined |
+| turn and nod, plus a square-on slide | 1.32 | 1.32 (truth 1.30 / 1.30) |
+
+The second row is the argument for asking the client for two movements rather
+than one, and is why the ring will grow a second phase.
 
 ### How much movement, and how the client knows
 
@@ -349,6 +625,29 @@ This is a better trade than it first appears. Accuracy is much better near the
 centre than at the edges, so shrinking the area does not merely make targets
 smaller: it moves all of them into the part of the range the tracker handles
 well. A 70% working area takes a 32 degree half-angle down to 24.
+
+## Blinks, again: the tool was still announcing them
+
+The visual side of this was fixed a while ago and the reasoning below still
+stands. A tester reported months later that it *still* felt like the tracker lost
+everything on a blink — and it did, in the two places nobody had looked.
+
+**A sound played on every blink.** A 600 Hz tone dropping to 180 Hz, on every
+closure. At fifteen blinks a minute that is an alarm going off every four
+seconds, telling the client that an involuntary reflex is a problem. Nothing
+consumed the event; the callback existed only to make the noise. The blink count
+is kept, because blink rate is a real clinical measure, but counting is not
+announcing.
+
+**The status readout flipped to "Blink".** The estimate is *held* through a
+blink rather than lost, so the honest label during one is the label it already
+had. An interruption long enough to be something other than a blink still reads
+as "Holding".
+
+The lesson worth keeping: the code had the right intent written into its own
+comments, and two channels the comments did not mention went on contradicting
+it. A claim that blinks are handled silently is only as good as an audit of
+every channel that can speak.
 
 ## Blinks
 

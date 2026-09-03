@@ -45,17 +45,25 @@ export const SessionBar: React.FC<SessionBarProps> = ({ onOpenCalibration }) => 
     ? 'text-sage-600'
     : 'text-honey-700';
 
+  /*
+    A blink is not a tracking state, so it is not reported as one.
+    
+    The estimate is held through a blink rather than lost, so the honest label
+    during one is the label it already had. Flipping the readout to "Blink"
+    fifteen times a minute told the client that a reflex they cannot suppress was
+    a thing the tool noticed and minded — and the natural response to that is to
+    stop blinking, which dries the eyes and makes tracking worse. An interruption
+    long enough to be something other than a blink still shows as "Holding".
+  */
   const trackingState = !gaze
     ? 'Starting'
     : gaze.event === 'lost'
     ? 'Eyes not found'
     : gaze.isVisiblyInterrupted
     ? 'Holding'
-    : gaze.event === 'fixation'
-    ? 'Steady'
-    : gaze.event === 'blink'
-    ? 'Blink'
-    : 'Moving';
+    : gaze.event === 'saccade'
+    ? 'Moving'
+    : 'Steady';
 
   return (
     <div className="hidden xl:flex items-center gap-1">

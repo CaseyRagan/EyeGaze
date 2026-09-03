@@ -15,9 +15,18 @@
 
 const STORAGE_KEY = 'gazeflow_viewing_geometry_v1';
 
+import { DEFAULT_DIAGONAL_INCHES, ScreenSizeSource, detectScreenDiagonalInches } from './screenSize';
+
 export interface ViewingGeometrySettings {
   /** Physical screen diagonal in inches. */
   screenDiagonalInches: number;
+  /**
+   * Where that diagonal came from, so the interface can tell the difference
+   * between a figure it recognised, one the user measured, and a placeholder.
+   * A wrong diagonal is invisible — it rescales every number reported in
+   * degrees without anything looking broken — so a guess has to announce itself.
+   */
+  screenSizeSource: ScreenSizeSource;
   /** Viewing distance in cm, used when live measurement is unavailable. */
   assumedDistanceCm: number;
   /** When true, the live face-model distance overrides the assumed distance. */
@@ -44,8 +53,10 @@ export interface ViewingGeometrySettings {
 
 const DEFAULTS: ViewingGeometrySettings = {
   // 15.6" is the most common built-in laptop panel, which is this app's
-  // primary target hardware.
-  screenDiagonalInches: 15.6,
+  // primary target hardware. Overridden at startup whenever the panel is one
+  // this machine can recognise.
+  screenDiagonalInches: DEFAULT_DIAGONAL_INCHES,
+  screenSizeSource: 'assumed',
   assumedDistanceCm: 55,
   useMeasuredDistance: true,
   distanceScale: 1,
@@ -62,6 +73,27 @@ class ViewingGeometry {
 
   constructor() {
     this.load();
+    this.adoptDetectedScreenSize();
+  }
+
+  /**
+   * Takes the detected panel size unless the user has already settled the
+   * question.
+   *
+   * Only overwrites a placeholder. Once someone has measured their screen with
+   * a card, or typed a figure themselves, that is the answer — a later guess
+   * from a resolution table must not quietly replace it.
+   */
+  private adoptDetectedScreenSize() {
+    if (this.settings.screenSizeSource !== 'assumed') return;
+    const detected = detectScreenDiagonalInches();
+    if (detected.source === 'assumed') return;
+    this.settings = {
+      ...this.settings,
+      screenDiagonalInches: detected.diagonalInches,
+      screenSizeSource: detected.source,
+    };
+    this.save();
   }
 
   public getSettings(): ViewingGeometrySettings {
@@ -109,25 +141,35 @@ class ViewingGeometry {
     return true;
   }
 
-  /** The distance actually used for conversions, in cm. */
+  /**
+   * The distance actually used for conversions, in cm.
+   *
+   * A live measurement is used whenever there is one, including when the two
+   * underlying estimates disagree. That is a change: disagreement used to fall
+   * back to the assumed figure in settings, on the reasoning that a measurement
+   * the app cannot vouch for is worse than a default. It is not — the default is
+   * a number nobody chose, fixed at 55 cm, and substituting it means a client
+   * who really is at 40 cm gets every figure rescaled by a third with no
+   * indication anything happened.
+   *
+   * Disagreement is real information, but it is information about *how much* to
+   * trust the number, not about whether to use it. It is reported as confidence
+   * instead, and the interface asks for a tape measure.
+   */
   public getEffectiveDistanceCm(): number {
     const measured = this.getMeasuredDistanceCm();
-    if (
-      this.settings.useMeasuredDistance &&
-      measured !== null &&
-      this.measurementAgreement >= MIN_DISTANCE_AGREEMENT
-    ) {
-      return measured;
-    }
+    if (this.settings.useMeasuredDistance && measured !== null) return measured;
     return this.settings.assumedDistanceCm;
   }
 
   public isDistanceMeasured(): boolean {
-    return (
-      this.settings.useMeasuredDistance &&
-      this.getMeasuredDistanceCm() !== null &&
-      this.measurementAgreement >= MIN_DISTANCE_AGREEMENT
-    );
+    return this.settings.useMeasuredDistance && this.getMeasuredDistanceCm() !== null;
+  }
+
+  /** How far the reported distance can be trusted. */
+  public getDistanceConfidence(): 'good' | 'uncertain' | 'assumed' {
+    if (!this.isDistanceMeasured()) return 'assumed';
+    return this.measurementAgreement >= MIN_DISTANCE_AGREEMENT ? 'good' : 'uncertain';
   }
 
   /**

@@ -10,10 +10,21 @@ import {
   RegressionModel,
   ValidationResult,
 } from '../types';
-import { median, ridgeSolve, robustInlierIndices, standardDeviation, standardiseColumns } from './linalg';
+import {
+  correlation,
+  median,
+  ridgeSolve,
+  robustInlierIndices,
+  standardDeviation,
+  standardiseColumns,
+} from './linalg';
 import { viewingGeometry } from './viewingGeometry';
 
-const STORAGE_KEY = 'gazeflow_calibration_v3';
+// v4: the gaze features changed meaning when the two image axes were put in the
+// same unit — vertical shrank by the aspect ratio and translateY with it. A model
+// fitted before that is not merely stale, it is wrong in a way nothing downstream
+// could detect, so old ones are dropped rather than loaded.
+const STORAGE_KEY = 'gazeflow_calibration_v4';
 
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
@@ -115,6 +126,22 @@ const NOMINAL_HEAD_GAIN: HeadGain = { rotation: 1, translation: 1 };
 const MIN_YAW_SPREAD = 0.02;
 const MIN_TRANSLATION_SPREAD = 0.006;
 
+/**
+ * Above this correlation between a rotation axis and its translation partner,
+ * the two cannot be told apart and no attempt is made to. 0.9 leaves room for
+ * the deliberately mixed movement the coverage ring asks for while catching the
+ * near-lockstep of an ordinary head turn.
+ */
+const MAX_SEPARABLE_CORRELATION = 0.9;
+
+/**
+ * How strongly head pose has to track the targets before the compensation stops
+ * being applied. Below the first figure the two are separable enough to trust;
+ * above the second they are the same measurement wearing different labels.
+ */
+const ALIAS_SAFE = 0.4;
+const ALIAS_BLIND = 0.75;
+
 
 
 export interface CalibrationPointSpec {
@@ -133,26 +160,35 @@ export const QUICK_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   { id: 5, label: 'bottom right', xPercent: 85, yPercent: 82 },
 ];
 
-/** Standard pass. Nine points is the usual clinical compromise. */
+/**
+ * Standard pass. Nine points is the usual clinical compromise.
+ *
+ * The top row sits at 20% rather than 15% because the instruction line is
+ * centred near the top of the screen, and at 15% the top-middle target landed
+ * directly behind it — the one point on the grid the client could not see. The
+ * bottom row matches at 80% so the grid stays symmetric about the centre; the
+ * cost is about four percent of the calibrated area, against a point that was
+ * being captured from someone hunting for a dot hidden under a sentence.
+ */
 export const DEFAULT_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
-  { id: 1, label: 'top left', xPercent: 12, yPercent: 15 },
-  { id: 2, label: 'top middle', xPercent: 50, yPercent: 15 },
-  { id: 3, label: 'top right', xPercent: 88, yPercent: 15 },
+  { id: 1, label: 'top left', xPercent: 12, yPercent: 20 },
+  { id: 2, label: 'top middle', xPercent: 50, yPercent: 20 },
+  { id: 3, label: 'top right', xPercent: 88, yPercent: 20 },
   { id: 4, label: 'middle left', xPercent: 12, yPercent: 50 },
   { id: 5, label: 'middle', xPercent: 50, yPercent: 50 },
   { id: 6, label: 'middle right', xPercent: 88, yPercent: 50 },
-  { id: 7, label: 'bottom left', xPercent: 12, yPercent: 85 },
-  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 85 },
-  { id: 9, label: 'bottom right', xPercent: 88, yPercent: 85 },
+  { id: 7, label: 'bottom left', xPercent: 12, yPercent: 80 },
+  { id: 8, label: 'bottom middle', xPercent: 50, yPercent: 80 },
+  { id: 9, label: 'bottom right', xPercent: 88, yPercent: 80 },
 ];
 
 /** Thirteen points, for when the extra minute is worth the extra precision. */
 export const PRECISION_CALIBRATION_TARGETS: CalibrationPointSpec[] = [
   ...DEFAULT_CALIBRATION_TARGETS,
-  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 32 },
-  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 32 },
-  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 68 },
-  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 68 },
+  { id: 10, label: 'upper left quadrant', xPercent: 30, yPercent: 35 },
+  { id: 11, label: 'upper right quadrant', xPercent: 70, yPercent: 35 },
+  { id: 12, label: 'lower left quadrant', xPercent: 30, yPercent: 65 },
+  { id: 13, label: 'lower right quadrant', xPercent: 70, yPercent: 65 },
 ];
 
 /**
@@ -573,6 +609,19 @@ export class CalibrationEngine {
    * far more gracefully past the edge of the calibrated region.
    */
   /**
+   * Overrides the measured head gain.
+   *
+   * Exists for the session replay, which scores a recording under alternative
+   * models — including no head compensation at all, which is the only way to
+   * tell whether the compensation earned its place on a particular client.
+   */
+  public setHeadGain(gain: HeadGain) {
+    this.model.headGain = gain;
+    this.model.headGainMeasured = true;
+    this.refit();
+  }
+
+  /**
    * Forces a feature set instead of choosing one, or null to choose again.
    *
    * Exists so the regression check can measure what the alternatives would
@@ -619,6 +668,52 @@ export class CalibrationEngine {
     return best;
   }
 
+  /**
+   * How much of the nominal head compensation is safe to apply.
+   *
+   * The docs have long said the head gain cannot be *measured* from an ordinary
+   * calibration grid, because each screen position is seen at exactly one head
+   * pose and the two explanations for a moved eye are aliased. The corollary went
+   * unnoticed for far longer: it cannot safely be *applied* to that grid either.
+   *
+   * People turn their head toward whatever they look at. In a recorded session,
+   * head yaw against target x came back at r = -0.87 — so subtracting a head
+   * term from the feature subtracts most of the gaze signal along with it, and
+   * the regression has to fight its own input to get back to where it started.
+   * Sweeping the multiplier on that session, held-out error rose monotonically
+   * with every increase: 4.32° with no compensation, 5.27° at full nominal
+   * strength. Compensation was costing a degree.
+   *
+   * So the compensation is only applied to the extent it is trustworthy:
+   *
+   * - measured by the head-movement pass, which holds the target still and
+   *   therefore breaks the aliasing by construction — trusted in full;
+   * - not measured, and the grid shows head pose tracking the target — not
+   *   applied, because it cannot be told apart from the thing being fitted;
+   * - not measured, but the head genuinely stayed put relative to the targets —
+   *   applied, since there is nothing for it to be confused with.
+   *
+   * Nothing is lost in the case that matters. Head compensation exists for
+   * movement *after* set-up, and when the pose is aliased with the targets the
+   * regression has already absorbed that person's head behaviour into its own
+   * weights.
+   */
+  private aliasTrust(anchors: CalibrationAnchor[]): number {
+    if (this.model.headGainMeasured) return 1;
+    if (anchors.length < 5) return 0;
+
+    const worst = Math.max(
+      Math.abs(correlation(anchors.map(a => a.headYaw), anchors.map(a => a.xNorm))),
+      Math.abs(correlation(anchors.map(a => a.headPitch), anchors.map(a => a.yNorm)))
+    );
+
+    // Fades out rather than switching, so a grid that is only mildly aliased
+    // still gets most of the compensation it deserves.
+    if (worst <= ALIAS_SAFE) return 1;
+    if (worst >= ALIAS_BLIND) return 0;
+    return (ALIAS_BLIND - worst) / (ALIAS_BLIND - ALIAS_SAFE);
+  }
+
   private fitRegression(anchors: CalibrationAnchor[], degree: number): RegressionModel | null {
     // The reference posture is the average head position across the anchors, so
     // compensation is zero at the posture the client actually calibrated in and
@@ -630,7 +725,14 @@ export class CalibrationEngine {
       translateY: median(anchors.map(a => a.headTranslateY)),
     };
 
-    return this.fitWithGain(anchors, degree, reference, this.model.headGain ?? NOMINAL_HEAD_GAIN);
+    const raw = this.model.headGain ?? NOMINAL_HEAD_GAIN;
+    const trust = this.aliasTrust(anchors);
+    const effective: HeadGain = {
+      rotation: raw.rotation * trust,
+      translation: raw.translation * trust,
+    };
+
+    return this.fitWithGain(anchors, degree, reference, effective);
   }
 
   /**
@@ -660,15 +762,47 @@ export class CalibrationEngine {
     const translationSpread = Math.max(txSpread, tySpread);
     if (rotationSpread < MIN_YAW_SPREAD && translationSpread < MIN_TRANSLATION_SPREAD) return null;
 
+    /**
+     * Rotation and translation are only separable if the client's head did them
+     * separately, and a neck does not oblige.
+     *
+     * You rotate about your neck, not about your eyeballs, so turning your head
+     * by dθ also slides your eyes sideways by roughly ten centimetres times dθ.
+     * The two regressors therefore arrive almost perfectly correlated, and with
+     * the rotation term carrying about eight times the leverage of the
+     * translation term, least squares can trade a small change in one against a
+     * large change in the other at almost no cost in residual. The split it
+     * returns is then arbitrary — and it is applied to every prediction
+     * afterwards, so an arbitrary split is not a harmless one. A field report
+     * showed exactly this: rotation pushed outside its plausible range and
+     * silently replaced by the fallback, translation left at 0.507, and the
+     * accuracy check afterwards 2.4x worse than the calibration grid it was
+     * fitted on.
+     *
+     * When the two move together, only their combined effect is real. Fitting
+     * the rotation term alone recovers that, attributes it to the term with the
+     * leverage, and leaves translation at the nominal constant — which is a
+     * worse model of a pure sideways slide than a good split would be, and a far
+     * better one than a split invented from collinear data.
+     */
+    const yawTxCorrelation = Math.abs(
+      correlation(usable.map(s => s.headYaw), usable.map(s => s.headTranslateX))
+    );
+    const pitchTyCorrelation = Math.abs(
+      correlation(usable.map(s => s.headPitch), usable.map(s => s.headTranslateY))
+    );
+    const horizontalSeparable = yawTxCorrelation < MAX_SEPARABLE_CORRELATION;
+    const verticalSeparable = pitchTyCorrelation < MAX_SEPARABLE_CORRELATION;
+
     // Horizontal: observed gx = constant - k_rot*yaw - k_trans*tx
     const horizontal = ridgeSolve(
-      usable.map(s => [1, s.headYaw, s.headTranslateX]),
+      usable.map(s => (horizontalSeparable ? [1, s.headYaw, s.headTranslateX] : [1, s.headYaw])),
       usable.map(s => s.gx),
       1e-6
     );
     // Vertical: observed gy = constant + k_rot*pitch - k_trans*ty
     const vertical = ridgeSolve(
-      usable.map(s => [1, s.headPitch, s.headTranslateY]),
+      usable.map(s => (verticalSeparable ? [1, s.headPitch, s.headTranslateY] : [1, s.headPitch])),
       usable.map(s => s.gy),
       1e-6
     );
@@ -679,18 +813,42 @@ export class CalibrationEngine {
 
     if (yawSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: -horizontal[1], weight: yawSpread });
     if (pitchSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: vertical[1], weight: pitchSpread });
-    if (txSpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -horizontal[2], weight: txSpread });
-    if (tySpread >= MIN_TRANSLATION_SPREAD) translationEstimates.push({ value: -vertical[2], weight: tySpread });
+    if (horizontalSeparable && txSpread >= MIN_TRANSLATION_SPREAD) {
+      translationEstimates.push({ value: -horizontal[2], weight: txSpread });
+    }
+    if (verticalSeparable && tySpread >= MIN_TRANSLATION_SPREAD) {
+      translationEstimates.push({ value: -vertical[2], weight: tySpread });
+    }
 
+    /**
+     * Averages the axis estimates — but only the ones that are individually
+     * believable.
+     *
+     * The horizontal and vertical estimates are separate physical measurements
+     * of very different quality. Horizontal is easy: the eye sweeps a wide arc
+     * and the iris stays fully visible. Vertical is not, because the lid covers
+     * the iris as the eye rolls up and down, so the same nod produces a smaller
+     * and dirtier signal.
+     *
+     * Averaging them regardless is how a good measurement gets destroyed by a
+     * bad one. On a recorded session the horizontal estimate came back at 0.65 —
+     * perfectly plausible — and the vertical at -0.25, which is not a person,
+     * it is a failed measurement. Their weighted mean was 0.20, below the
+     * plausible floor, so the whole pass was written off and the run fell back
+     * to textbook constants it did not need to.
+     *
+     * An estimate outside the plausible range is therefore discarded as a
+     * failure on that axis rather than folded into the answer for the other.
+     */
     const combine = (estimates: Array<{ value: number; weight: number }>, nominal: number) => {
-      if (estimates.length === 0) return 1;
-      const total = estimates.reduce((sum, e) => sum + e.weight, 0);
-      const value = estimates.reduce((sum, e) => sum + e.value * e.weight, 0) / total;
-      const ratio = value / nominal;
-      // Anything outside this range is a measurement failure rather than an
-      // unusual person, so fall back to the nominal constant rather than
-      // trusting it.
-      return ratio >= 0.3 && ratio <= 3 ? ratio : 1;
+      const believable = estimates.filter(e => {
+        const ratio = e.value / nominal;
+        return ratio >= 0.3 && ratio <= 3;
+      });
+      if (believable.length === 0) return 1;
+      const total = believable.reduce((sum, e) => sum + e.weight, 0);
+      const value = believable.reduce((sum, e) => sum + e.value * e.weight, 0) / total;
+      return value / nominal;
     };
 
     const gain: HeadGain = {
@@ -699,6 +857,9 @@ export class CalibrationEngine {
     };
 
     this.model.headGain = gain;
+    // Exactly nominal on both axes is the fallback, not a measurement, and a
+    // fallback must not buy the trust that breaking the aliasing earns.
+    this.model.headGainMeasured = gain.rotation !== 1 || gain.translation !== 1;
     this.refit();
     return gain;
   }
