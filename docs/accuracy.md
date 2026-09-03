@@ -340,6 +340,40 @@ fell monotonically all the way to the most negative value tried — the signatur
 of a term pointing the wrong way. After it, both have an interior minimum, which
 is what a real physical parameter looks like.
 
+### Turning and nodding are not the same measurement
+
+The gain fit produced one `rotation` figure and `compensateForHead` applied it to
+both axes. Measured separately on the movement pass, across three recorded
+sessions from the same person:
+
+| | turn (yaw → horizontal) | nod (pitch → vertical) |
+|---|---|---|
+| session 1 | **+0.68** | −0.22 |
+| session 2 | **+0.65** | −0.25 |
+| session 3 | **+0.83** | −0.10 |
+
+Reproducible, and nothing like each other. The reason is anatomical rather than
+numerical: **the eyelid follows the eye vertically.** Look down and the lid comes
+down with you, clipping the visible iris and dragging its estimated centre back
+toward the middle of the aperture. The vertical feature therefore under-responds
+to vertical eye rotation in a way the horizontal one does not, and a small or
+slightly negative vertical gain is the honest result rather than a broken one.
+
+Merging them meant applying a horizontally-derived number to the vertical axis.
+In session 3, whose entire error was a 6.5° drift in head pitch between teaching
+the model and checking it, that is the one place it could do most harm — top-row
+check points came in at 0.09° and 1.31° while the bottom row was 9.76° and
+11.52°, an error growing straight down the screen.
+
+Each axis is now fitted and applied on its own, with its own plausible range:
+horizontal is a well-conditioned measurement so a figure far from the textbook
+constant there is a failure, while vertical is allowed to be near zero because
+that is what it repeatedly is.
+
+Replayed across the three sessions: **5.30° mean → 4.60°.** Two improved
+substantially (5.14 → 3.72 and 5.04 → 4.23) and one got slightly worse
+(5.72 → 5.86), which is recorded here rather than rounded away.
+
 ### One bad axis was destroying a good one
 
 Even with the sign right, the gain fit kept failing. The horizontal and vertical
@@ -794,6 +828,36 @@ already a median over roughly thirty samples, which removes most of the
 per-sample noise this was meant to address; what remains is structural fit
 error, and re-weighting the eyes does not touch it. Two extra model parameters
 for 5% is a bad trade on real data, so the average stands.
+
+## What a number is good for
+
+A single verdict — "good", "needs another go" — answers a question nobody asked.
+What a clinician needs to know is whether *this* session supports *this* task,
+and the tasks differ enormously in what they forgive. Taken from the activities
+themselves rather than invented, the reach of each target (its radius plus the
+assist margin the activity already allows):
+
+| | reach | at 43 cm on a 14" screen |
+|---|---|---|
+| games, large setting | 117 px | 3.1° |
+| games, medium setting | 79 px | 2.1° |
+| spelling by gaze | 60 px | 1.6° |
+| games, small setting | 48 px | 1.3° |
+| reading assessment | 35 px | 0.9° |
+
+Landing exactly on a target's reach means missing about half the time, so
+"comfortable" is set at 60% of it and "workable" at the boundary.
+
+That reframes the grade usefully. A tester at 3.77° was being told his set-up
+had failed and shown a list of physical causes; what he actually needed to know
+is that he is 0.7° away from the large game targets becoming usable, and a
+long way from reading assessment. The result screen now says both, and names the
+accuracy that would bring the next task into range.
+
+It also sets the honest expectation for this whole class of tracker. Reading
+assessment wants under a degree, which is around the best a webcam ever
+manages — that is a hard target, and pretending otherwise in the interface would
+be a disservice to the clinician relying on it.
 
 ## What the numbers mean
 

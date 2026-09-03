@@ -19,6 +19,7 @@ import {
 import { FaceMeshTracker } from '../services/faceMeshTracker';
 import { soundEngine } from '../services/audio';
 import { viewingGeometry } from '../services/viewingGeometry';
+import { nextMilestone, suitabilityFor } from '../services/suitability';
 import { HeadPositionCard } from './HeadPositionCard';
 import { DistanceCheck } from './DistanceCheck';
 import { ScreenSizeCard } from './ScreenSizeCard';
@@ -672,7 +673,9 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         // it cannot trust what it measured. Reporting that as "measured"
         // because a non-null object came back is how this step used to claim
         // success while having learned nothing.
-        const measured = gain !== null && (gain.rotation !== 1 || gain.translation !== 1);
+        const measured =
+          gain !== null &&
+          (gain.rotationX !== 1 || gain.rotationY !== 1 || gain.translation !== 1);
         recordedHeadPassRef.current = {
           samples: [...samplesRef.current],
           coverage: { ...headCoverageRef.current },
@@ -1486,6 +1489,7 @@ const ResultStage: React.FC<{
   }
 
   const grade = GRADE_COPY[validation.grade];
+  const milestone = nextMilestone(validation.accuracyPx);
 
   return (
     <div className="flex-1 overflow-auto">
@@ -1517,6 +1521,63 @@ const ResultStage: React.FC<{
             value={`${Math.round(validation.trackingRatio * 100)}%`}
             note="Share of the check where the eyes were tracked"
           />
+        </div>
+
+        {/*
+          What the number means for what happens next.
+
+          A single grade answers a question nobody asked. What a clinician needs
+          is whether this session supports the task in front of them, and the
+          tasks differ enormously in what they forgive — a large dwell target
+          allows well over a hundred pixels, and attributing a fixation to a word
+          allows about thirty. Reporting one verdict against an absolute scale
+          hides that, and tells someone at a perfectly workable accuracy for the
+          games that their set-up failed.
+        */}
+        <div className="surface rounded-2xl p-5">
+          <h4 className="text-sm font-semibold text-ink mb-1">What this is good for</h4>
+          <p className="text-xs text-ink-faint mb-3 leading-relaxed">
+            Measured against the real size of each target, including the margin each activity
+            already allows.
+          </p>
+          <ul className="space-y-2">
+            {suitabilityFor(validation.accuracyPx).map(item => (
+              <li key={item.label} className="flex items-start gap-2.5">
+                <span
+                  className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${
+                    item.verdict === 'comfortable'
+                      ? 'bg-sage-500'
+                      : item.verdict === 'workable'
+                        ? 'bg-honey-500'
+                        : 'bg-[var(--border-strong)]'
+                  }`}
+                />
+                <span className="min-w-0">
+                  <span
+                    className={`text-sm ${
+                      item.verdict === 'not yet' ? 'text-ink-faint' : 'text-ink font-medium'
+                    }`}
+                  >
+                    {item.label}
+                  </span>
+                  <span className="text-xs text-ink-faint block leading-relaxed">
+                    {item.verdict === 'comfortable'
+                      ? 'Ready.'
+                      : item.verdict === 'workable'
+                        ? 'Usable, with the occasional miss.'
+                        : 'Not yet — needs a tighter result.'}{' '}
+                    {item.detail}
+                  </span>
+                </span>
+              </li>
+            ))}
+          </ul>
+          {milestone && (
+            <p className="text-xs text-ink-soft mt-3 leading-relaxed">
+              Reaching about {milestone.deg.toFixed(1)}° would bring {milestone.label.toLowerCase()}{' '}
+              into range.
+            </p>
+          )}
         </div>
 
         <div className="surface rounded-2xl p-5">

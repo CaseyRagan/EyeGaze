@@ -117,7 +117,7 @@ interface Variant {
   label: string;
   rule?: 'settled' | 'all';
   degree?: number | null;
-  headGain?: { rotation: number; translation: number } | null;
+  headGain?: { rotationX: number; rotationY: number; translation: number } | null;
   stripResiduals?: boolean;
 }
 
@@ -232,8 +232,8 @@ if (typeof reported === 'number') {
 
 const variants: Variant[] = [
   { label: 'as it ran' },
-  { label: 'no head compensation', headGain: { rotation: 0, translation: 0 } },
-  { label: 'nominal head gain', headGain: { rotation: 1, translation: 1 } },
+  { label: 'no head compensation', headGain: { rotationX: 0, rotationY: 0, translation: 0 } },
+  { label: 'nominal head gain', headGain: { rotationX: 1, rotationY: 1, translation: 1 } },
   { label: 'global fit only (no local term)', stripResiduals: true },
   { label: 'straight line (degree 1)', degree: 1 },
   { label: 'with cross term (degree 2)', degree: 2 },
@@ -252,7 +252,7 @@ const variants: Variant[] = [
  */
 const sweep: Variant[] = [-1, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.5, 2].map(k => ({
   label: `head gain x${k}`,
-  headGain: { rotation: k, translation: k },
+  headGain: { rotationX: k, rotationY: k, translation: k },
 }));
 
 console.log('\n--- Same samples, different model (scored on the check points) ---');
@@ -265,7 +265,9 @@ for (const variant of variants) {
   }
   if (result.meanDeg < best.deg) best = { label: variant.label, deg: result.meanDeg };
   const gain = result.headGain
-    ? `${result.headGain.rotation.toFixed(2)}/${result.headGain.translation.toFixed(2)}`
+    ? `${result.headGain.rotationX.toFixed(2)} turn / ` +
+      `${result.headGain.rotationY.toFixed(2)} nod / ` +
+      `${result.headGain.translation.toFixed(2)} shift`
     : 'none';
   console.log(
     `  ${variant.label.padEnd(34)} ${result.meanDeg.toFixed(2)}°  ` +
@@ -312,6 +314,55 @@ if (record.headPass?.samples?.length) {
   if (yawDeg < 4 && pitchDeg < 4) {
     console.log('  → barely any movement, so nothing could have been measured from it.');
   }
+}
+
+/**
+ * Does the mapping reach as far as the eye does?
+ *
+ * A fit that under-reaches puts every estimate slightly toward the middle of the
+ * screen: right in the centre, increasingly short at the edges. That looks like
+ * ordinary error in a mean figure and like something specific in a per-point
+ * one, so it is worth measuring directly. Ridge regularisation shrinks weights
+ * toward zero by design, and on a standardised fit that shows up as exactly this.
+ */
+{
+  const engine = new CalibrationEngine();
+  engine.reset();
+  for (const point of capture) {
+    const samples = samplesFor(point, 'settled');
+    if (samples.length) engine.addAnchorFromSamples(`p${point.id}`, point.xNorm, point.yNorm, samples, point.label);
+  }
+  if (record.headPass?.samples?.length) engine.fitHeadGainFromMotionPass(record.headPass.samples);
+
+  const predictedOffsets: number[] = [];
+  const trueOffsets: number[] = [];
+
+  for (const point of validation) {
+    const samples = samplesFor(point, 'settled');
+    if (!samples.length) continue;
+    let sx = 0, sy = 0, n = 0;
+    for (const s of samples) {
+      const m = engine.mapToScreen(s.gx, s.gy, {
+        yaw: s.headYaw, pitch: s.headPitch, roll: 0,
+        translateX: s.headTranslateX, translateY: s.headTranslateY,
+        distanceCm: record.geometry.effectiveDistanceCm, distanceAgreement: 1, interocularSpan: 0.08,
+      }, W, H);
+      if (!m) continue;
+      sx += m.x; sy += m.y; n++;
+    }
+    if (!n) continue;
+    // Distance from screen centre, predicted against true.
+    predictedOffsets.push(Math.hypot(sx / n - W / 2, sy / n - H / 2));
+    trueOffsets.push(Math.hypot(point.xNorm * W - W / 2, point.yNorm * H - H / 2));
+  }
+
+  const reach =
+    predictedOffsets.reduce((a, b) => a + b, 0) / trueOffsets.reduce((a, b) => a + b, 0);
+  console.log('\n--- Does the mapping reach far enough? ---');
+  console.log(
+    `  predictions sit ${(reach * 100).toFixed(0)}% as far from centre as the targets do` +
+      (reach < 0.92 ? '  <- under-reaching' : reach > 1.08 ? '  <- over-reaching' : '  <- about right')
+  );
 }
 
 // --- Where the session was unsteady -----------------------------------------
