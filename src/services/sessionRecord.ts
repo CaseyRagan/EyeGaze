@@ -28,11 +28,16 @@ import { viewingGeometry } from './viewingGeometry';
  * It is also the honest record of a clinical measurement. A figure a clinician
  * acts on should be reproducible from what was actually observed.
  */
-export const SESSION_RECORD_VERSION = 3;
+export const SESSION_RECORD_VERSION = 4;
 /**
  * v3: head yaw and roll are mirrored to match the landmark frame. Recordings
  * from before it hold yaw with the opposite sign, which the replay corrects so
  * older sessions stay comparable rather than becoming unreadable.
+ *
+ * v4: every sample carries lidGy, the second vertical cue. Sessions recorded
+ * before it hold null there and replay exactly as they did, which is the point
+ * — the earlier recordings are the evidence that the cue was needed, and they
+ * have to stay readable to remain evidence.
  */
 
 export interface RecordedPoint {

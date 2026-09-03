@@ -859,6 +859,105 @@ assessment wants under a degree, which is around the best a webcam ever
 manages — that is a hard target, and pretending otherwise in the interface would
 be a disservice to the clinician relying on it.
 
+## The vertical channel was half blind, and the report could not see it
+
+A tester finished a session at 3.0°, said it was the most accurate yet, and sent
+two screenshots. In one he was looking at the navigation bar across the top of
+the window; the cursor sat near the middle of the screen. In the other he was
+looking at the stats row along the bottom; the cursor sat near the middle again.
+Both figures on the result screen — 3.0° accuracy, 0.12° steadiness, 100% of
+frames tracked — said the set-up was fine.
+
+The session recording settled it in one table. Averaging the accepted samples at
+each of the nine calibration points:
+
+| | signal moves | per unit of screen |
+|---|---|---|
+| horizontal, full width | 0.157 | **0.206** |
+| vertical, full height | 0.025 | **0.041** |
+
+The vertical channel carried a fifth of the horizontal channel's range. Split in
+half it was worse: across the bottom half of the screen `gy` moved 0.064 per unit,
+across the top half **0.017**, against a per-point sample noise of 0.001 to 0.006.
+Over the entire upper half of the screen the vertical signal was barely above its
+own noise.
+
+That is the eyelid. `gy` is the iris centre's offset from the eye corners, and
+when the eye rolls up the upper lid rises with it and covers the top of the iris.
+MediaPipe fits the iris landmarks to whatever arc is still visible, so the centre
+it reports is dragged back down, cancelling most of the movement. Looking down
+the lid follows too, but the iris still clears it — which is exactly why the
+bottom half of the screen survived and the top half did not.
+
+Running his fitted model forward reproduced both screenshots. Looking at the
+navigation bar at 3% of screen height, it predicted 39%. Looking at the stats row
+at 93%, it predicted 76% — the observed dot was at 77%.
+
+### Why 3.0° did not notice
+
+Two reasons, and both were fixable.
+
+The check points sat at 28% and 72% of the height, covering the middle 44% of the
+screen. Inside a band that narrow, a mapping that only reaches half as far as it
+should is still nearly right. They now sit at 20% and 80%, and the calibration
+grid — which had been pulled in to 20/80 to keep the top row clear of the
+instruction text — went out to 10/90, since the text had already been moved to
+whichever end of the screen the target is not at.
+
+The bigger reason is that one mean over two axes cannot report an axis that has
+stopped working. Measured separately, that session reaches **90% side to side and
+50% up and down**. The result screen now shows both, as reach rather than error:
+error shrinks when the points being tested are near the centre, and reach does
+not. Reach is also what makes the failure legible to a person — *when you looked
+right to the edge, did the estimate follow* is the question the screenshots were
+asking.
+
+### A second opinion on the vertical axis
+
+The landmarker also emits `eyeLookUp` and `eyeLookDown` blendshapes, predicted
+from the whole eye region rather than from a circle fitted to the visible iris.
+They are coarser than the geometric feature. The useful property is not that they
+are better — it is that they are wrong about different things, and in particular
+they do not go blind when the lid covers the iris.
+
+`lidGy = eyeLookDown - eyeLookUp` now goes to the regression as its own column
+rather than being blended in with a weight chosen here. A fixed blend would be a
+guess applied to every face; a column is a question asked of each person's own
+calibration. If the cue tells us nothing, ridge shrinks it to nothing and the
+mapping is no worse than before.
+
+### The tests could not have caught this
+
+The synthetic eye in `scripts/calibrationCheck.ts` was isotropic — a degree of
+upward gaze moved `gy` exactly as far as a degree of sideways gaze moved `gx` —
+so every scenario passed while the real vertical channel was five times weaker.
+It now has a lid: a visibility term that falls off as the eye rolls up, with its
+three constants fitted by grid search so the synthetic eye reproduces both ratios
+measured on the real session (5.03x horizontal-to-vertical against a measured
+5.04x, and 3.72x bottom-half-to-top-half against a measured 3.72x).
+
+Against that eye the check now asserts four things, and the numbers are worth
+recording because they are the closest thing to a prediction of what the cue will
+do on a real face:
+
+| | vertical reach | mean error |
+|---|---|---|
+| healthy eye | 90% | 0.60° |
+| lidded eye, no cue | **30%** | 2.66° |
+| lidded eye, with the cue | **85%** | 0.83° |
+| healthy eye, with the cue | — | 0.60° |
+
+The 30% is independent corroboration rather than a coincidence: it was produced
+by an eye tuned only to the two sensitivity ratios, and it lands close to the 50%
+measured on the session itself. The last row matters as much as the others — the
+cue must not be a tax on someone whose vertical channel was never in trouble.
+
+What none of this proves is how good MediaPipe's `eyeLook` outputs actually are
+on a real face. The mechanism is now tested; the magnitude is not, and only a
+recorded session can settle it. `bun run replay <file>` scores every session with
+the cue and without it, so the next recording answers the question directly
+instead of by screenshot.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
