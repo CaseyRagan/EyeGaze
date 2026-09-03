@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, Check, ChevronLeft, RefreshCw, Target as TargetIcon, X } from 'lucide-react';
+import { ArrowRight, Check, ChevronLeft, Download, RefreshCw, Target as TargetIcon, X } from 'lucide-react';
 import {
   CalibrationSample,
   GazeState,
@@ -25,6 +25,13 @@ import { ScreenSizeCard } from './ScreenSizeCard';
 import { GazeRangeCheck } from './GazeRangeCheck';
 import { gazeBus } from '../services/gazeBus';
 import { cancelSpeech, speakPrompt } from '../services/speech';
+import {
+  RecordedPoint,
+  SessionRecord,
+  buildSessionRecord,
+  downloadSessionRecord,
+  estimateRecordSizeKb,
+} from '../services/sessionRecord';
 import {
   DIRECTION_PROMPT,
   EMPTY_COVERAGE,
@@ -291,6 +298,22 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
   /** Shown when a press arrives before the eye has held still long enough. */
   const [confirmNudge, setConfirmNudge] = useState(false);
 
+  /**
+   * The session recording, accumulated as it happens.
+   *
+   * Written alongside the working refs rather than reconstructed at the end,
+   * because most of what makes a run diagnosable — which samples arrived, when,
+   * and whether each was judged settled at the time — is discarded by the
+   * summarising the working refs do. Nothing here is sent anywhere; it becomes a
+   * file only if the user asks for one.
+   */
+  const recordedCaptureRef = useRef<RecordedPoint[]>([]);
+  const recordedValidationRef = useRef<RecordedPoint[]>([]);
+  const recordedHeadPassRef = useRef<SessionRecord['headPass']>(null);
+  /** Settled flags and arrival times, parallel to samplesRef. */
+  const sampleSettledRef = useRef<boolean[]>([]);
+  const sampleTimesRef = useRef<number[]>([]);
+
   const samplesRef = useRef<CalibrationSample[]>([]);
   /**
    * Samples taken while the eye was actually settled.
@@ -375,23 +398,47 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     settledSamplesRef.current = [];
     settledPointsRef.current = [];
     gazePointsRef.current = [];
+    sampleSettledRef.current = [];
+    sampleTimesRef.current = [];
     phaseStartRef.current = performance.now();
     soundEngine.playChime(560, 0.1);
   }, [confirmMode]);
 
   const startValidationPhase = useCallback(() => {
     validationResultsRef.current = [];
+    recordedValidationRef.current = [];
     framesSeenRef.current = 0;
     framesUsedRef.current = 0;
     setStage('validate');
     beginPoint(0);
   }, [beginPoint]);
 
+  /** Freezes everything observed at one dot, for the session recording. */
+  const recordPoint = useCallback(
+    (spec: CalibrationPointSpec, usedSampleCount: number, confirmedAt?: number): RecordedPoint => {
+      const { xNorm, yNorm } = targetViewportNorm(spec);
+      return {
+        id: String(spec.id),
+        label: spec.label,
+        xNorm,
+        yNorm,
+        samples: [...samplesRef.current],
+        settled: [...sampleSettledRef.current],
+        timestamps: [...sampleTimesRef.current],
+        usedSampleCount,
+        confirmedAt,
+      };
+    },
+    []
+  );
+
   const finishCapturePoint = useCallback(
-    (spec: CalibrationPointSpec, confirmed?: CalibrationSample[]) => {
+    (spec: CalibrationPointSpec, confirmed?: CalibrationSample[], confirmedAt?: number) => {
       const settled = settledSamplesRef.current;
       const chosen =
         confirmed ?? (settled.length >= MIN_SETTLED_SAMPLES ? settled : samplesRef.current);
+
+      recordedCaptureRef.current.push(recordPoint(spec, chosen.length, confirmedAt));
 
       const { xNorm, yNorm } = targetViewportNorm(spec);
       const anchor = calibrationEngine.addAnchorFromSamples(
@@ -409,13 +456,18 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         setFailedPoints(prev => (prev.includes(spec.id) ? prev : [...prev, spec.id]));
       }
     },
-    []
+    [recordPoint]
   );
 
   const finishValidatePoint = useCallback((
     spec: CalibrationPointSpec,
-    confirmed?: Array<{ x: number; y: number; t: number }>
+    confirmed?: Array<{ x: number; y: number; t: number }>,
+    confirmedAt?: number
   ) => {
+    recordedValidationRef.current.push(
+      recordPoint(spec, (confirmed ?? settledPointsRef.current).length, confirmedAt)
+    );
+
     // Measure accuracy from settled samples only. Including the approach to the
     // dot would report the journey rather than the destination.
     const points =
@@ -482,7 +534,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     });
 
     soundEngine.playChime(640, 0.12);
-  }, []);
+  }, [recordPoint]);
 
   const completeValidation = useCallback(() => {
     const points = validationResultsRef.current.filter(p => Number.isFinite(p.errorPx));
@@ -543,6 +595,8 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
       }
 
       samplesRef.current.push(sample);
+      sampleSettledRef.current.push(gaze.isFixating);
+      sampleTimesRef.current.push(gaze.timestamp);
       if (gaze.isFixating) {
         settledSamplesRef.current.push(sample);
         settledPointsRef.current.push({ x: gaze.screenX, y: gaze.screenY, t: gaze.timestamp });
@@ -602,6 +656,11 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         // because a non-null object came back is how this step used to claim
         // success while having learned nothing.
         const measured = gain !== null && (gain.rotation !== 1 || gain.translation !== 1);
+        recordedHeadPassRef.current = {
+          samples: [...samplesRef.current],
+          coverage: { ...headCoverageRef.current },
+          outcome: measured ? 'measured' : 'failed',
+        };
         setHeadPassCoverage(coverageFraction(headCoverageRef.current));
         setHeadPassOutcome(measured ? 'measured' : 'failed');
         soundEngine.playChime(measured ? 640 : 380, 0.15);
@@ -632,8 +691,8 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         ? undefined
         : settledWithin(windowEnd - CONFIRM_LOOKBACK_MS, windowEnd);
 
-    if (stage === 'capture') finishCapturePoint(currentTarget, captured?.samples);
-    else finishValidatePoint(currentTarget, captured?.points);
+    if (stage === 'capture') finishCapturePoint(currentTarget, captured?.samples, confirmedAt);
+    else finishValidatePoint(currentTarget, captured?.points, confirmedAt);
 
     const next = targetIndex + 1;
     if (next < targets.length) {
@@ -768,8 +827,41 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
     };
   }, [isOpen, stage, phase, currentTarget, confirmMode, settledWithin, advance]);
 
+  /**
+   * Writes the run to a file.
+   *
+   * Assembled on demand rather than kept in state: it is several hundred
+   * kilobytes of samples, and re-rendering the result screen around it would be
+   * paying that cost continuously for something most sessions never ask for.
+   */
+  const saveRecording = useCallback(() => {
+    const record = buildSessionRecord({
+      depth,
+      confirmMode,
+      capture: recordedCaptureRef.current,
+      headPass: recordedHeadPassRef.current,
+      validation: recordedValidationRef.current,
+      prunedPoints,
+      result: validation,
+      cameraDiagnostics: {
+        resolution: tracker?.getDiagnostics().resolution ?? null,
+        fps: tracker?.getDiagnostics().fps ?? 0,
+        matrixLayout: tracker?.getDiagnostics().features?.matrixLayout ?? null,
+        usedFallbackHeadPose: tracker?.getDiagnostics().features?.usedFallbackHeadPose ?? null,
+      },
+      trackingSettings: settings,
+    });
+    downloadSessionRecord(record);
+    return estimateRecordSizeKb(record);
+  }, [depth, confirmMode, prunedPoints, validation, tracker, settings]);
+
   const beginBriefedPhase = useCallback(() => {
     if (briefFor === 'capture') {
+      // A fresh grid is a fresh recording; a retry must not inherit the points
+      // of the run it is replacing.
+      recordedCaptureRef.current = [];
+      recordedValidationRef.current = [];
+      recordedHeadPassRef.current = null;
       setStage('capture');
       beginPoint(0);
     } else if (briefFor === 'head_pass') {
@@ -898,6 +990,7 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
           validation={validation}
           failedPoints={failedPoints}
           onRedo={() => setStage('position')}
+          onSaveRecording={saveRecording}
           onRecheck={startValidationOnly}
           onAccept={() => {
             onFinished();
@@ -1344,6 +1437,8 @@ const ResultStage: React.FC<{
   onRedo: () => void;
   onRecheck: () => void;
   onAccept: () => void;
+  /** Saves the run to a file, returning its size in kilobytes. */
+  onSaveRecording: () => number;
 }> = ({
   validation,
   failedPoints,
@@ -1353,7 +1448,9 @@ const ResultStage: React.FC<{
   onRedo,
   onRecheck,
   onAccept,
+  onSaveRecording,
 }) => {
+  const [savedKb, setSavedKb] = useState<number | null>(null);
   if (!validation || !Number.isFinite(validation.accuracyDeg)) {
     return (
       <div className="flex-1 flex items-center justify-center px-6">
@@ -1503,6 +1600,32 @@ const ResultStage: React.FC<{
             <ChevronLeft className="w-4 h-4" />
             Start over
           </button>
+        </div>
+
+        {/*
+          Offered on every run, not just poor ones. A good session is the more
+          useful recording of the two — it is the thing a change has to avoid
+          breaking, and without one there is nothing to compare a bad session
+          against.
+        */}
+        <div className="surface rounded-2xl px-5 py-4 space-y-2">
+          <h4 className="text-sm font-semibold text-ink">Save this session</h4>
+          <p className="text-sm text-ink-soft leading-relaxed">
+            Writes every measurement this run was built from to a file — the samples behind each
+            dot, the head positions they were taken at, and the model fitted from them. It stays on
+            this machine unless you send it. It is what makes a disappointing result diagnosable
+            rather than a mystery.
+          </p>
+          <button
+            onClick={() => setSavedKb(onSaveRecording())}
+            className="px-4 py-2.5 rounded-xl border border-strong text-ink text-sm font-medium flex items-center gap-2 hover:bg-[var(--surface-sunken)] transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Save the session file
+          </button>
+          {savedKb !== null && (
+            <p className="text-xs text-sage-600">Saved, about {savedKb} KB.</p>
+          )}
         </div>
       </div>
     </div>

@@ -601,6 +601,18 @@ export class CalibrationEngine {
    * far more gracefully past the edge of the calibrated region.
    */
   /**
+   * Overrides the measured head gain.
+   *
+   * Exists for the session replay, which scores a recording under alternative
+   * models — including no head compensation at all, which is the only way to
+   * tell whether the compensation earned its place on a particular client.
+   */
+  public setHeadGain(gain: HeadGain) {
+    this.model.headGain = gain;
+    this.refit();
+  }
+
+  /**
    * Forces a feature set instead of choosing one, or null to choose again.
    *
    * Exists so the regression check can measure what the alternatives would

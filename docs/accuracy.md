@@ -106,6 +106,48 @@ assumed field of view — both scale with focal length identically — so a stab
 disagreement is telling us the person's anatomy differs from the assumed
 constants, not that the measurement failed.
 
+## Keeping the samples, not just the conclusions
+
+Everything else this app reports is a summary — an accuracy figure, a
+cross-validated error, five per-point numbers. A summary is enough to know a
+session went badly and never enough to know why. Four disappointing runs in a row
+produced four different signatures, each diagnosed by inference from about five
+aggregate numbers, which is guessing with extra steps.
+
+A session can now be saved from the result screen. It contains every sample that
+went into every calibration point — not the accepted subset, the whole window,
+because which samples *should* have been accepted is one of the things worth
+re-deciding later — along with whether each was judged settled at the time, when
+it arrived, the head pose it was taken at, the head-movement pass, and the fitted
+model including its residuals. About 130 KB for a nine-point session. It stays on
+the machine unless someone sends it.
+
+`bun run replay <file>` is the other half, and without it the file is just data.
+It rebuilds the calibration from the recorded samples, reproduces the accuracy
+figure the client was shown — which is the check that the recording is complete
+enough to reason from — and then refits the *same* samples under variations,
+scoring each on the check points no variant was fitted on:
+
+```
+--- Same samples, different model (scored on the check points) ---
+  as it ran                          0.36°  (15 px)   loo 63 px   terms 1
+  no head compensation               0.36°  (15 px)   loo 63 px   terms 1
+  global fit only (no local term)    0.59°  (24 px)   loo 63 px   terms 1
+  every sample, settled or not       0.40°  (16 px)   loo 62 px   terms 1
+```
+
+It also answers, directly, two questions that were previously guessed at: whether
+the head-movement pass contained any head movement (it reports the yaw and pitch
+actually swept, so a pass that "succeeded" while measuring nothing says so), and
+how far the head drifted between teaching the model and checking it — the one
+failure where the grid is internally consistent, the check is internally
+consistent, and they describe two different head positions.
+
+The point is that a change to the mapping can now be argued from a real client's
+eyes rather than from synthetic data and a plausible story. Every number above is
+measured on held-out points, so a variation that fits the grid better and the
+check worse is one that has learned the grid, and the table says so.
+
 ## What limits accuracy
 
 The error you actually experience is the sum of four things. They are listed in
