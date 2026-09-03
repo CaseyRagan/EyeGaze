@@ -453,6 +453,16 @@ export function extractGazeFeatures(
   const isBlinkingLeft = openA < 0.35;
   const isBlinkingRight = openB < 0.35;
 
+  /**
+   * How open both eyes have to be before the eyelid gaze cue is believed.
+   *
+   * Deliberately higher than both the blink threshold (0.35) and the gaze-trust
+   * threshold the tracker uses (0.5), because this particular signal degrades
+   * earliest: it is read from the eye region, so it starts lying as soon as the
+   * lid moves, well before the lid is closed enough for anything else to notice.
+   */
+  const LID_CUE_TRUST_OPENNESS = 0.65;
+
   // --- A second, independent vertical cue -----------------------------------
   /*
    * The geometric feature above measures where the iris centre sits relative to
@@ -496,7 +506,27 @@ export function extractGazeFeatures(
     'eyeLookUpLeft' in blendshapes ||
     'eyeLookDownRight' in blendshapes ||
     'eyeLookUpRight' in blendshapes;
-  const lidGy = hasLidCue ? lookDown - lookUp : null;
+
+  /*
+   * And withdrawn the moment a lid starts to close.
+   *
+   * This cue reads the eye region, and a descending lid looks a great deal like
+   * an eye rolling downward — so eyeLookDown climbs at the start of every blink,
+   * before the lid is anywhere near closed. The blink gate downstream only
+   * engages at half-open, which leaves a window on the way down where the cue
+   * has already spiked and nothing has stopped it being mapped. In that window
+   * the estimate lurches toward the bottom of the screen, which is what a user
+   * experiences as losing the target on every blink, and what puts a
+   * contaminated sample into the calibration set on the way past.
+   *
+   * The threshold sits above the blink gate on purpose: this cue has to be
+   * abandoned while it is still merely suspect, not once it is provably wrong.
+   * Null rather than a held value, so the model uses its own fitted mean for
+   * the term and the vertical estimate falls back on the iris alone — degraded
+   * rather than actively misled.
+   */
+  const bothLidsTrustworthy = Math.min(openA, openB) > LID_CUE_TRUST_OPENNESS;
+  const lidGy = hasLidCue && bothLidsTrustworthy ? lookDown - lookUp : null;
 
   // --- Binocular fusion -----------------------------------------------------
   // Weight each eye by how open it is and how square-on it is to the camera.

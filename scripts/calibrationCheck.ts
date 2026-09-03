@@ -881,5 +881,82 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   }
 }
 
+/**
+ * A cue that is worse than useless has to be turned down.
+ *
+ * The first shipped version of the eyelid cue always went into the fit if the
+ * camera supplied it. On a real face that took vertical reach from 50% to
+ * 100-120% — the range came back — while vertical error rose past four degrees
+ * and the frame-to-frame wobble doubled, because two collinear vertical signals
+ * let the fit reach the anchors with large opposing weights and amplify the
+ * noise in both. "Ridge will shrink it to nothing if it says nothing" was the
+ * intention and was not true.
+ *
+ * What makes it true is refusing the cue rather than weakening it. The model is
+ * now fitted both ways and the cue is kept only when holding an anchor out says
+ * it helps, so a cue that is pure noise costs nothing, and one that is actively
+ * misleading is declined outright.
+ */
+{
+  console.log('\n--- A cue that carries nothing must be refused ---');
+
+  const GRID = GRIDS['9-point'];
+  const fitWith = (cue: (gyTruth: number) => number | null) => {
+    reseed();
+    const engine = new CalibrationEngine();
+    engine.reset();
+    GRID.forEach(([x, y], i) => {
+      const samples = makeSamples(x, y, 0.0016, 30, STILL, 'lidded').map(sm => ({
+        ...sm,
+        lidGy: cue(sm.gy),
+      }));
+      engine.addAnchorFromSamples(`p${i}`, x, y, samples);
+    });
+    return engine.getModel();
+  };
+
+  // Pure noise, on the same scale as the real cue.
+  const noise = fitWith(() => gaussian(0.05));
+  const refusedNoise = noise.regression?.usesLidCue === false;
+  if (!refusedNoise) failures++;
+  console.log(
+    `${refusedNoise ? 'ok  ' : 'FAIL'}  a cue that is pure noise is declined     ` +
+      `usesLidCue ${noise.regression?.usesLidCue}`
+  );
+
+  // The genuine cue is still taken.
+  const genuine = fitWith(gy => gy);
+  const keptGenuine = genuine.regression?.usesLidCue === true;
+  if (!keptGenuine) failures++;
+  console.log(
+    `${keptGenuine ? 'ok  ' : 'FAIL'}  and a cue that helps is still taken      ` +
+      `usesLidCue ${genuine.regression?.usesLidCue}`
+  );
+
+  /*
+   * The case in between is the one that actually bit: a cue carrying real
+   * signal, but not enough of it to pay for what it costs.
+   *
+   * A sign-flipped cue is not this — a linear fit simply gives it a negative
+   * coefficient, so inverting it proves nothing, and asserting otherwise was a
+   * mistake in an earlier version of this check. What matters is signal-to-noise:
+   * somewhere between a clean cue and pure noise there has to be a crossover
+   * where taking it stops being worth it, and the guard has to find it rather
+   * than accepting anything with a correlation.
+   */
+  const decisions = [0, 0.01, 0.02, 0.05, 0.1, 0.2].map(sigma => ({
+    sigma,
+    taken: fitWith(gyv => gyv + gaussian(sigma)).regression?.usesLidCue === true,
+  }));
+  const firstRefusal = decisions.findIndex(d => !d.taken);
+  const crossoverExists =
+    firstRefusal > 0 && decisions.slice(firstRefusal).every(d => !d.taken);
+  if (!crossoverExists) failures++;
+  console.log(
+    `${crossoverExists ? 'ok  ' : 'FAIL'}  noisier cues stop being worth taking     ` +
+      decisions.map(d => `${d.sigma}:${d.taken ? 'take' : 'drop'}`).join('  ')
+  );
+}
+
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

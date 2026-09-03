@@ -501,7 +501,11 @@ export class CalibrationEngine {
       if (anchors.length <= 5) break;
 
       const degree = this.model.regression?.degree ?? featureDegreeForAnchorCount(anchors.length);
-      const errors = this.leaveOneOutErrors(anchors, degree);
+      const errors = this.leaveOneOutErrors(
+        anchors,
+        degree,
+        this.model.regression?.usesLidCue ?? false
+      );
       if (errors.length === 0) break;
 
       const magnitudes = errors.map(e => e.errorPx);
@@ -533,7 +537,8 @@ export class CalibrationEngine {
   /** Per-anchor leave-one-out error in pixels, for one candidate feature set. */
   private leaveOneOutErrors(
     anchors: CalibrationAnchor[],
-    degree: number
+    degree: number,
+    allowLidCue: boolean
   ): Array<{ id: string; errorPx: number }> {
     if (anchors.length < 5) return [];
 
@@ -549,7 +554,13 @@ export class CalibrationEngine {
         translateX: median(subset.map(a => a.headTranslateX)),
         translateY: median(subset.map(a => a.headTranslateY)),
       };
-      const fitted = this.fitWithGain(subset, degree, reference, this.model.headGain ?? NOMINAL_HEAD_GAIN);
+      const fitted = this.fitWithGain(
+        subset,
+        degree,
+        reference,
+        this.model.headGain ?? NOMINAL_HEAD_GAIN,
+        allowLidCue
+      );
       if (!fitted) continue;
 
       const a = anchors[held];
@@ -619,8 +630,9 @@ export class CalibrationEngine {
       return this.model;
     }
 
-    const degree = this.selectFeatureDegree(anchors);
-    const regression = this.fitRegression(anchors, degree);
+    const shape = this.selectModelShape(anchors);
+    const degree = shape.degree;
+    const regression = this.fitRegression(anchors, degree, shape.useLidCue);
 
     if (!regression) {
       this.model = { ...this.model, isCalibrated: false, regression: undefined };
@@ -634,7 +646,7 @@ export class CalibrationEngine {
       isCalibrated: true,
       lastCalibratedAt: Date.now(),
       regression,
-      quality: this.computeQuality(anchors, degree),
+      quality: this.computeQuality(anchors, degree, shape.useLidCue),
     };
     this.save();
     this.emit();
@@ -687,8 +699,9 @@ export class CalibrationEngine {
   /** Cross-validated error for each feature set that was considered, for diagnostics. */
   public getFeatureDegreeScores(): Array<{ degree: number; looErrorPx: number }> {
     const anchors = this.getAnchors();
+    const useLidCue = this.model.regression?.usesLidCue ?? false;
     return candidateDegrees(anchors.length).map(degree => {
-      const errors = this.leaveOneOutErrors(anchors, degree);
+      const errors = this.leaveOneOutErrors(anchors, degree, useLidCue);
       return {
         degree,
         looErrorPx:
@@ -697,27 +710,37 @@ export class CalibrationEngine {
     });
   }
 
-  private selectFeatureDegree(anchors: CalibrationAnchor[]): number {
-    if (this.featureDegreeOverride !== null) return this.featureDegreeOverride;
-    const candidates = candidateDegrees(anchors.length);
-    let best = candidates[0];
+  private selectModelShape(anchors: CalibrationAnchor[]): { degree: number; useLidCue: boolean } {
+    const hasCue = anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
+    const shapes: Array<{ degree: number; useLidCue: boolean }> = [];
+    for (const degree of candidateDegrees(anchors.length)) {
+      shapes.push({ degree, useLidCue: false });
+      if (hasCue) shapes.push({ degree, useLidCue: true });
+    }
+
+    let best = shapes[0];
     let bestError = Infinity;
 
-    for (const degree of candidates) {
-      const errors = this.leaveOneOutErrors(anchors, degree);
+    for (const shape of shapes) {
+      if (this.featureDegreeOverride !== null && shape.degree !== this.featureDegreeOverride) continue;
+
+      const errors = this.leaveOneOutErrors(anchors, shape.degree, shape.useLidCue);
       // Too few anchors to cross-validate at all: fall back to the count rule.
-      if (errors.length === 0) return featureDegreeForAnchorCount(anchors.length);
+      if (errors.length === 0) {
+        return { degree: featureDegreeForAnchorCount(anchors.length), useLidCue: false };
+      }
 
       const mean = errors.reduce((sum, e) => sum + e.errorPx, 0) / errors.length;
       if (!Number.isFinite(mean)) continue;
       if (mean < bestError * MODEL_UPGRADE_MARGIN) {
-        best = degree;
+        best = shape;
         bestError = mean;
       }
     }
 
     return best;
   }
+
 
   /**
    * How much of the nominal head compensation is safe to apply.
@@ -765,7 +788,11 @@ export class CalibrationEngine {
     return (ALIAS_BLIND - worst) / (ALIAS_BLIND - ALIAS_SAFE);
   }
 
-  private fitRegression(anchors: CalibrationAnchor[], degree: number): RegressionModel | null {
+  private fitRegression(
+    anchors: CalibrationAnchor[],
+    degree: number,
+    allowLidCue: boolean
+  ): RegressionModel | null {
     // The reference posture is the average head position across the anchors, so
     // compensation is zero at the posture the client actually calibrated in and
     // the fit is unchanged for someone who does not move.
@@ -784,7 +811,7 @@ export class CalibrationEngine {
       translation: raw.translation * trust,
     };
 
-    return this.fitWithGain(anchors, degree, reference, effective);
+    return this.fitWithGain(anchors, degree, reference, effective, allowLidCue);
   }
 
   /**
@@ -940,7 +967,8 @@ export class CalibrationEngine {
     anchors: CalibrationAnchor[],
     degree: number,
     reference: FeaturePosture,
-    gain: HeadGain
+    gain: HeadGain,
+    allowLidCue: boolean
   ): RegressionModel | null {
     const compensated = anchors.map(a =>
       compensateForHead(
@@ -956,7 +984,37 @@ export class CalibrationEngine {
     // for some anchors and absent for others would have to be filled in for the
     // rest, and an invented value is indistinguishable from a measured one once
     // it is in the matrix.
-    const usesLidCue = anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
+    // The cue is only a column if every anchor has it. A column that is present
+    // for some anchors and absent for others would have to be filled in for the
+    // rest, and an invented value is indistinguishable from a measured one once
+    // it is in the matrix.
+    const usesLidCue =
+      allowLidCue && anchors.every(a => a.lidGy !== null && Number.isFinite(a.lidGy));
+
+    /*
+     * Handed over raw, not orthogonalised — which was tried, and measured, and
+     * was wrong.
+     *
+     * The concern was real: the cue and the iris feature are both measuring
+     * vertical gaze, so they are strongly correlated, and two collinear columns
+     * let a fit satisfy the data with a large positive weight on one and a large
+     * negative weight on the other, amplifying the noise in both. That is what
+     * the first shipped version looked like from the outside — vertical reach
+     * went from 50% to 100-120%, and vertical error and frame-to-frame wobble
+     * went up with it.
+     *
+     * So the obvious repair was to give the regression only the part of the cue
+     * the iris could not already predict. On the lidded synthetic eye that
+     * moved cross-validated error from 260px to 257px and recovered none of the
+     * lost range, against 260px to 100px for the raw column, which recovered it
+     * all. The reason is plain in hindsight: what the cue is *for* is that its
+     * vertical range does not collapse, and projecting out everything the iris
+     * already explains removes precisely that, leaving only curvature.
+     *
+     * The protection against the collinear failure is therefore not to weaken
+     * the column but to decline it — see selectModelShape, which fits both ways
+     * and keeps the cue only when holding an anchor out says it earns its place.
+     */
     const lidOf = (i: number) => (usesLidCue ? (anchors[i].lidGy as number) : null);
 
     const rawRows = compensated.map((c, i) => buildFeatureRow(c.gx, c.gy, degree, lidOf(i)));
@@ -1035,8 +1093,12 @@ export class CalibrationEngine {
    * model lands on it. This is the only calibration number worth showing a
    * clinician, because it is the only one the model could not simply memorise.
    */
-  private computeQuality(anchors: CalibrationAnchor[], degree: number): CalibrationQuality {
-    const looErrors = this.leaveOneOutErrors(anchors, degree);
+  private computeQuality(
+    anchors: CalibrationAnchor[],
+    degree: number,
+    useLidCue: boolean
+  ): CalibrationQuality {
+    const looErrors = this.leaveOneOutErrors(anchors, degree, useLidCue);
     const crossValidatedErrorPx =
       looErrors.length > 0 ? looErrors.reduce((sum, e) => sum + e.errorPx, 0) / looErrors.length : 0;
 
@@ -1085,9 +1147,13 @@ export class CalibrationEngine {
     // blendshapes — the column falls back to the value it was centred on, which
     // is the fitted mean, so the term contributes nothing rather than lurching.
     const lidColumn = regression.usesLidCue
-      ? (lidGy !== null && Number.isFinite(lidGy)
-          ? lidGy
-          : regression.featureMean[regression.featureMean.length - 1])
+      ? lidGy !== null && Number.isFinite(lidGy)
+        ? lidGy
+        : // The cue withdrew — a lid on its way down, or a camera that stopped
+          // supplying it. Standing the column at its fitted mean makes the term
+          // contribute nothing, so the vertical estimate falls back on the iris
+          // rather than lurching on a value nobody measured.
+          regression.featureMean[regression.featureMean.length - 1]
       : null;
 
     const raw = buildFeatureRow(compensated.gx, compensated.gy, regression.degree, lidColumn);
