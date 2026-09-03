@@ -140,6 +140,62 @@ function buildLandmarks(options: {
   return landmarks;
 }
 
+/**
+ * A head rotated by `yawDeg` about the vertical axis, as MediaPipe reports it.
+ *
+ * The landmarks and the transformation matrix come from the same rotation, so
+ * anything downstream that reads both has to agree with itself about which way
+ * the head is turned. That sounds like it could not fail; it did.
+ */
+function buildYawedFace(yawDeg: number, distanceCm: number) {
+  const yaw = (yawDeg * Math.PI) / 180;
+  const c = Math.cos(yaw);
+  const sn = Math.sin(yaw);
+
+  const landmarks: Array<{ x: number; y: number; z: number }> = Array.from(
+    { length: 478 },
+    () => ({ x: 0.5, y: 0.5, z: 0 })
+  );
+
+  // Rotate about the vertical axis through the head centre, then project.
+  const place = (index: number, local: { x: number; y: number; z: number }) => {
+    const x = local.x * c + local.z * sn;
+    const z = -local.x * sn + local.z * c;
+    landmarks[index] = project({ x, y: local.y, z: distanceCm + z });
+  };
+
+  const eyes = [
+    { cx: -INTEROCULAR_CM / 2, s: { outer: 33, inner: 133, top: 159, bottom: 145, iris: 468, ring: [469, 470, 471, 472] } },
+    { cx: +INTEROCULAR_CM / 2, s: { outer: 263, inner: 362, top: 386, bottom: 374, iris: 473, ring: [474, 475, 476, 477] } },
+  ];
+  for (const { cx, s } of eyes) {
+    const out = cx < 0 ? -1 : 1;
+    place(s.outer, { x: cx + out * EYE_HALF_WIDTH_CM, y: 0, z: 0 });
+    place(s.inner, { x: cx - out * EYE_HALF_WIDTH_CM, y: 0, z: 0 });
+    place(s.top, { x: cx, y: EYE_HALF_HEIGHT_CM, z: 0 });
+    place(s.bottom, { x: cx, y: -EYE_HALF_HEIGHT_CM, z: 0 });
+    place(s.iris, { x: cx, y: 0, z: 0 });
+    place(s.ring[0], { x: cx + IRIS_RADIUS_CM, y: 0, z: 0 });
+    place(s.ring[1], { x: cx, y: IRIS_RADIUS_CM, z: 0 });
+    place(s.ring[2], { x: cx - IRIS_RADIUS_CM, y: 0, z: 0 });
+    place(s.ring[3], { x: cx, y: -IRIS_RADIUS_CM, z: 0 });
+  }
+  place(1, { x: 0, y: -2, z: 2 });
+  place(10, { x: 0, y: 6, z: 0 });
+  place(152, { x: 0, y: -8, z: 0 });
+  place(234, { x: -7, y: 0, z: 0 });
+  place(454, { x: 7, y: 0, z: 0 });
+
+  // The same rotation as a column-major 4x4, which is what MediaPipe hands back.
+  const m = new Float32Array(16);
+  m[0] = c;  m[4] = 0; m[8]  = sn; m[12] = 0;
+  m[1] = 0;  m[5] = 1; m[9]  = 0;  m[13] = 0;
+  m[2] = -sn; m[6] = 0; m[10] = c; m[14] = distanceCm;
+  m[3] = 0;  m[7] = 0; m[11] = 0;  m[15] = 1;
+
+  return { landmarks, matrix: m };
+}
+
 let failures = 0;
 
 function check(label: string, ok: boolean, detail: string) {
@@ -237,6 +293,40 @@ console.log('\n--- Same gaze, head rolled: gx must not move ---');
       `gx moved ${drift.toFixed(5)} = ${(screenFraction * 100).toFixed(1)}% of screen width`
     );
   }
+}
+
+// --- 5. Do the two head-pose sources agree which way the head is turned? ----
+//
+// The landmarks are mirrored, so that the picture matches what the client sees
+// and "looked right" means the irises moved right. The transformation matrix is
+// not mirrored — it arrives in the camera's own frame. Everything in the
+// extractor is measured in the mirrored frame, so a yaw taken straight from the
+// matrix points the opposite way to every quantity it is combined with.
+//
+// Nothing catches that by inspection, and downstream it does not look like a
+// sign error: head compensation simply makes accuracy worse, and the pass that
+// measures how much compensation to apply returns a negative number that gets
+// rejected for being out of range. Two recorded sessions showed exactly that,
+// with matrix yaw correlating at -0.98 against sideways head travel taken from
+// the landmarks — two measurements of the same movement, pointing opposite ways.
+
+console.log('\n--- Head turn: matrix and landmarks must agree ---');
+for (const yawDeg of [-12, 12]) {
+  const { landmarks, matrix } = buildYawedFace(yawDeg, 50);
+  const withMatrix = extractGazeFeatures(landmarks, {}, matrix);
+  const fromLandmarks = extractGazeFeatures(landmarks, {});
+
+  const matrixYaw = withMatrix?.headPose.yaw ?? NaN;
+  const landmarkYaw = fromLandmarks?.headPose.yaw ?? NaN;
+  const agree = Math.sign(matrixYaw) === Math.sign(landmarkYaw);
+
+  check(
+    `head turned ${yawDeg}°`,
+    agree,
+    `matrix says ${((matrixYaw * 180) / Math.PI).toFixed(1)}°, ` +
+      `landmarks say ${((landmarkYaw * 180) / Math.PI).toFixed(1)}°` +
+      (agree ? '' : '  <- opposite directions')
+  );
 }
 
 console.log(failures === 0 ? '\nAll geometry checks passed.' : `\n${failures} check(s) failed.`);

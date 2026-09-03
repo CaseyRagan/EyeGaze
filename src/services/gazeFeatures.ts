@@ -207,9 +207,31 @@ function decomposeTransform(matrix?: Float32Array | number[]): {
 
   if (![r10, r11, r12, r02, r22, tz].every(Number.isFinite)) return null;
 
-  const yaw = Math.atan2(r02, r22);
+  /*
+    Mirrored, to match every other quantity in this file.
+
+    The landmarks are flipped horizontally so the picture matches what the client
+    sees and "looked to the right" means the irises moved right. This matrix is
+    not flipped — it arrives in the camera's own frame. A yaw taken straight from
+    it therefore points the opposite way to the gaze feature it gets combined
+    with, and to the sideways head travel measured from the same landmarks.
+
+    Nothing catches that by inspection, and downstream it does not look like a
+    sign error. It looks like head compensation simply making accuracy worse, and
+    like the pass that measures how much to apply returning a negative number
+    that gets rejected for being out of range — which is what two recorded
+    sessions showed, with matrix yaw correlating at -0.98 against sideways head
+    travel from the landmarks. Two measurements of one movement, pointing
+    opposite ways.
+
+    A horizontal mirror negates rotation about the vertical axis (yaw) and about
+    the view axis (roll), and leaves rotation about the horizontal axis (pitch)
+    alone — which is exactly the pattern in those recordings: yaw at -0.98
+    against its landmark partner, pitch at +0.99.
+  */
+  const yaw = -Math.atan2(r02, r22);
   const pitch = Math.asin(Math.max(-1, Math.min(1, -r12)));
-  const roll = Math.atan2(r10, r11);
+  const roll = -Math.atan2(r10, r11);
 
   // The canonical face model is expressed in centimetres, so the depth
   // component of the translation is directly a distance estimate — subject to

@@ -820,15 +820,35 @@ export class CalibrationEngine {
       translationEstimates.push({ value: -vertical[2], weight: tySpread });
     }
 
+    /**
+     * Averages the axis estimates — but only the ones that are individually
+     * believable.
+     *
+     * The horizontal and vertical estimates are separate physical measurements
+     * of very different quality. Horizontal is easy: the eye sweeps a wide arc
+     * and the iris stays fully visible. Vertical is not, because the lid covers
+     * the iris as the eye rolls up and down, so the same nod produces a smaller
+     * and dirtier signal.
+     *
+     * Averaging them regardless is how a good measurement gets destroyed by a
+     * bad one. On a recorded session the horizontal estimate came back at 0.65 —
+     * perfectly plausible — and the vertical at -0.25, which is not a person,
+     * it is a failed measurement. Their weighted mean was 0.20, below the
+     * plausible floor, so the whole pass was written off and the run fell back
+     * to textbook constants it did not need to.
+     *
+     * An estimate outside the plausible range is therefore discarded as a
+     * failure on that axis rather than folded into the answer for the other.
+     */
     const combine = (estimates: Array<{ value: number; weight: number }>, nominal: number) => {
-      if (estimates.length === 0) return 1;
-      const total = estimates.reduce((sum, e) => sum + e.weight, 0);
-      const value = estimates.reduce((sum, e) => sum + e.value * e.weight, 0) / total;
-      const ratio = value / nominal;
-      // Anything outside this range is a measurement failure rather than an
-      // unusual person, so fall back to the nominal constant rather than
-      // trusting it.
-      return ratio >= 0.3 && ratio <= 3 ? ratio : 1;
+      const believable = estimates.filter(e => {
+        const ratio = e.value / nominal;
+        return ratio >= 0.3 && ratio <= 3;
+      });
+      if (believable.length === 0) return 1;
+      const total = believable.reduce((sum, e) => sum + e.weight, 0);
+      const value = believable.reduce((sum, e) => sum + e.value * e.weight, 0) / total;
+      return value / nominal;
     };
 
     const gain: HeadGain = {

@@ -306,6 +306,55 @@ Holding the target fixed while the head moves removes the ambiguity. Every bit
 of variation in the measurement is then head-driven, and a plain three-parameter
 regression recovers the coefficients directly.
 
+### The head was turning the wrong way
+
+The landmarks are mirrored, so the picture matches what the client sees and
+"looked to the right" means the irises moved right. MediaPipe's transformation
+matrix is **not** mirrored — it arrives in the camera's own frame. Head yaw taken
+straight from that matrix therefore pointed the opposite way to every quantity it
+was combined with.
+
+Nothing catches that by inspection, and downstream it does not look like a sign
+error. It looks like head compensation making accuracy worse, and like the pass
+that measures how much to apply returning a negative number that gets rejected
+for being out of range. Both of those were happening, for months.
+
+Two recorded sessions proved it without any appeal to matrix conventions.
+Turning your head left rotates you left *and* slides your eyes left, because the
+pivot is your neck — so in one consistent frame those must move together:
+
+| | yaw vs sideways travel | pitch vs vertical travel |
+|---|---|---|
+| session 1 | **−0.98** | +0.99 |
+| session 2 | **−0.99** | +0.99 |
+
+A horizontal mirror negates rotation about the vertical axis (yaw) and about the
+view axis (roll), and leaves rotation about the horizontal axis (pitch) alone.
+That is exactly the pattern. `scripts/geometryCheck.ts` now builds a yawed head
+with matching landmarks and matrix and requires the two to agree; it failed
+before the fix and passes after.
+
+The clearest confirmation is in the shape of the curve. Sweeping the
+compensation multiplier against held-out error, *before* the fix both sessions
+fell monotonically all the way to the most negative value tried — the signature
+of a term pointing the wrong way. After it, both have an interior minimum, which
+is what a real physical parameter looks like.
+
+### One bad axis was destroying a good one
+
+Even with the sign right, the gain fit kept failing. The horizontal and vertical
+estimates are separate measurements of very different quality — horizontal is
+easy, because the eye sweeps a wide arc with the iris fully visible; vertical is
+not, because the lid covers the iris as the eye rolls. On one session horizontal
+came back at 0.65, perfectly plausible, and vertical at −0.25, which is not a
+person but a failed measurement. Their weighted mean was 0.20, below the
+plausible floor, so the entire pass was written off.
+
+An implausible estimate is now discarded as a failure on that axis rather than
+folded into the answer for the other. Both recorded sessions now measure a gain
+of 0.65 and 0.68 — two independent measurements of the same person agreeing, at
+about two thirds of the textbook constant.
+
 ### An unmeasured gain must not be applied to an aliased grid
 
 The section above has always said the head gain cannot be *measured* from an
@@ -331,6 +380,13 @@ model never saw:
 | ×2 | 6.04° |
 
 Monotonic. Compensation was costing a degree, and the more of it, the worse.
+
+**That sweep was measured with the head turning the wrong way**, and the section
+above explains why. With the sign corrected the curve has an interior minimum
+and compensation is roughly a wash across the two sessions — it helps one by
+0.43° and costs the other the same. The reasoning below still stands as the
+right default when the gain *cannot* be measured, which is the only case it now
+applies to; it is no longer the whole story it briefly appeared to be.
 
 The pose measurement is also noisier than the movement it is correcting for: on
 that session the within-dwell spread of head yaw was 0.19° against 0.27° of real

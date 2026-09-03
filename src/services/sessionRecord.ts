@@ -28,7 +28,12 @@ import { viewingGeometry } from './viewingGeometry';
  * It is also the honest record of a clinical measurement. A figure a clinician
  * acts on should be reproducible from what was actually observed.
  */
-export const SESSION_RECORD_VERSION = 2;
+export const SESSION_RECORD_VERSION = 3;
+/**
+ * v3: head yaw and roll are mirrored to match the landmark frame. Recordings
+ * from before it hold yaw with the opposite sign, which the replay corrects so
+ * older sessions stay comparable rather than becoming unreadable.
+ */
 
 export interface RecordedPoint {
   id: string;

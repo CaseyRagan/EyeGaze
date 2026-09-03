@@ -79,6 +79,19 @@ interface RecordedPoint {
   usedSampleCount: number;
 }
 
+/*
+  Recordings made before v3 hold head yaw in the camera's frame while every other
+  quantity in them is mirrored. Flipping it here keeps old sessions comparable
+  with new ones instead of quietly scoring them under a convention they were not
+  measured in.
+*/
+if ((record.version ?? 1) < 3) {
+  const flip = (samples: any[]) => samples.forEach(s => { s.headYaw = -s.headYaw; });
+  for (const p of [...record.capture, ...record.validation]) flip(p.samples);
+  if (record.headPass?.samples) flip(record.headPass.samples);
+  console.log('(pre-v3 recording: head yaw flipped into the mirrored frame)');
+}
+
 const capture: RecordedPoint[] = record.capture;
 const validation: RecordedPoint[] = record.validation;
 
