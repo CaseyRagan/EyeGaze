@@ -334,8 +334,9 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
 
   const fittedGain = withPass.fitHeadGainFromMotionPass(motionSamples);
   console.log(
-    `      head-movement pass measured gain: rotation ${fittedGain?.rotation.toFixed(2)}, ` +
-      `translation ${fittedGain?.translation.toFixed(2)} (truth implies 1.30 / 1.30)`
+    `      head-movement pass measured gain: turn ${fittedGain?.rotationX.toFixed(2)}, ` +
+      `nod ${fittedGain?.rotationY.toFixed(2)}, ` +
+      `translation ${fittedGain?.translation.toFixed(2)} (truth implies 1.30 each)`
   );
 
   const variedAtRest = evaluate(withPass, STILL);
@@ -644,11 +645,11 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   // The right answer is therefore a single gain carried by the rotation term —
   // here 1.42, which is the combined truth — and translation left at the
   // nominal constant rather than at a number invented from collinear data.
-  const combined = gain !== null && gain.rotation > 1.1 && gain.rotation < 1.8 && gain.translation === 1;
+  const combined = gain !== null && gain.rotationX > 1.1 && gain.rotationX < 1.8 && gain.translation === 1;
   if (!combined) failures++;
   console.log(
     `${combined ? 'ok  ' : 'FAIL'}  a turn measures the combined effect      ` +
-      (gain ? `rotation ${gain.rotation.toFixed(2)}, translation ${gain.translation.toFixed(2)}` : 'no fit')
+      (gain ? `rotation ${gain.rotationX.toFixed(2)}, translation ${gain.translation.toFixed(2)}` : 'no fit')
   );
 
   /**
@@ -704,7 +705,7 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
   console.log(
     `${separated ? 'ok  ' : 'FAIL'}  adding a slide separates the two         ` +
       (bothGain
-        ? `rotation ${bothGain.rotation.toFixed(2)}, translation ${bothGain.translation.toFixed(2)}`
+        ? `rotation ${bothGain.rotationX.toFixed(2)}, translation ${bothGain.translation.toFixed(2)}`
         : 'no fit')
   );
 }

@@ -340,6 +340,40 @@ fell monotonically all the way to the most negative value tried — the signatur
 of a term pointing the wrong way. After it, both have an interior minimum, which
 is what a real physical parameter looks like.
 
+### Turning and nodding are not the same measurement
+
+The gain fit produced one `rotation` figure and `compensateForHead` applied it to
+both axes. Measured separately on the movement pass, across three recorded
+sessions from the same person:
+
+| | turn (yaw → horizontal) | nod (pitch → vertical) |
+|---|---|---|
+| session 1 | **+0.68** | −0.22 |
+| session 2 | **+0.65** | −0.25 |
+| session 3 | **+0.83** | −0.10 |
+
+Reproducible, and nothing like each other. The reason is anatomical rather than
+numerical: **the eyelid follows the eye vertically.** Look down and the lid comes
+down with you, clipping the visible iris and dragging its estimated centre back
+toward the middle of the aperture. The vertical feature therefore under-responds
+to vertical eye rotation in a way the horizontal one does not, and a small or
+slightly negative vertical gain is the honest result rather than a broken one.
+
+Merging them meant applying a horizontally-derived number to the vertical axis.
+In session 3, whose entire error was a 6.5° drift in head pitch between teaching
+the model and checking it, that is the one place it could do most harm — top-row
+check points came in at 0.09° and 1.31° while the bottom row was 9.76° and
+11.52°, an error growing straight down the screen.
+
+Each axis is now fitted and applied on its own, with its own plausible range:
+horizontal is a well-conditioned measurement so a figure far from the textbook
+constant there is a failure, while vertical is allowed to be near zero because
+that is what it repeatedly is.
+
+Replayed across the three sessions: **5.30° mean → 4.60°.** Two improved
+substantially (5.14 → 3.72 and 5.04 → 4.23) and one got slightly worse
+(5.72 → 5.86), which is recorded here rather than rounded away.
+
 ### One bad axis was destroying a good one
 
 Even with the sign right, the gain fit kept failing. The horizontal and vertical

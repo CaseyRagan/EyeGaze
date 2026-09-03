@@ -117,7 +117,7 @@ interface Variant {
   label: string;
   rule?: 'settled' | 'all';
   degree?: number | null;
-  headGain?: { rotation: number; translation: number } | null;
+  headGain?: { rotationX: number; rotationY: number; translation: number } | null;
   stripResiduals?: boolean;
 }
 
@@ -232,8 +232,8 @@ if (typeof reported === 'number') {
 
 const variants: Variant[] = [
   { label: 'as it ran' },
-  { label: 'no head compensation', headGain: { rotation: 0, translation: 0 } },
-  { label: 'nominal head gain', headGain: { rotation: 1, translation: 1 } },
+  { label: 'no head compensation', headGain: { rotationX: 0, rotationY: 0, translation: 0 } },
+  { label: 'nominal head gain', headGain: { rotationX: 1, rotationY: 1, translation: 1 } },
   { label: 'global fit only (no local term)', stripResiduals: true },
   { label: 'straight line (degree 1)', degree: 1 },
   { label: 'with cross term (degree 2)', degree: 2 },
@@ -252,7 +252,7 @@ const variants: Variant[] = [
  */
 const sweep: Variant[] = [-1, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1, 1.5, 2].map(k => ({
   label: `head gain x${k}`,
-  headGain: { rotation: k, translation: k },
+  headGain: { rotationX: k, rotationY: k, translation: k },
 }));
 
 console.log('\n--- Same samples, different model (scored on the check points) ---');
@@ -265,7 +265,9 @@ for (const variant of variants) {
   }
   if (result.meanDeg < best.deg) best = { label: variant.label, deg: result.meanDeg };
   const gain = result.headGain
-    ? `${result.headGain.rotation.toFixed(2)}/${result.headGain.translation.toFixed(2)}`
+    ? `${result.headGain.rotationX.toFixed(2)} turn / ` +
+      `${result.headGain.rotationY.toFixed(2)} nod / ` +
+      `${result.headGain.translation.toFixed(2)} shift`
     : 'none';
   console.log(
     `  ${variant.label.padEnd(34)} ${result.meanDeg.toFixed(2)}°  ` +

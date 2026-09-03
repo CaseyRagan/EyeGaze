@@ -128,7 +128,7 @@ export interface RegressionModel {
   /** The head pose the model was fitted at; head compensation is relative to it. */
   reference: { yaw: number; pitch: number; translateX: number; translateY: number };
   /** Fitted multipliers on the nominal head-compensation constants. */
-  headGain: { rotation: number; translation: number };
+  headGain: { rotationX: number; rotationY: number; translation: number };
   /** Weights for the standardised design matrix, one set per output axis. */
   weightsX: number[];
   weightsY: number[];
@@ -194,7 +194,7 @@ export interface CalibrationPosture {
 export interface CalibrationModel {
   isCalibrated: boolean;
   /** Person-specific multipliers on the head-compensation constants. */
-  headGain?: { rotation: number; translation: number };
+  headGain?: { rotationX: number; rotationY: number; translation: number };
   /**
    * Whether those multipliers came from the head-movement pass rather than from
    * the nominal fallback. Only a measured gain is trusted on a grid where head

@@ -672,7 +672,9 @@ export const CalibrationFlow: React.FC<CalibrationFlowProps> = ({
         // it cannot trust what it measured. Reporting that as "measured"
         // because a non-null object came back is how this step used to claim
         // success while having learned nothing.
-        const measured = gain !== null && (gain.rotation !== 1 || gain.translation !== 1);
+        const measured =
+          gain !== null &&
+          (gain.rotationX !== 1 || gain.rotationY !== 1 || gain.translation !== 1);
         recordedHeadPassRef.current = {
           samples: [...samplesRef.current],
           coverage: { ...headCoverageRef.current },

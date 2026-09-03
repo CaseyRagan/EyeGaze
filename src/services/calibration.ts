@@ -24,7 +24,7 @@ import { viewingGeometry } from './viewingGeometry';
 // same unit — vertical shrank by the aspect ratio and translateY with it. A model
 // fitted before that is not merely stale, it is wrong in a way nothing downstream
 // could detect, so old ones are dropped rather than loaded.
-const STORAGE_KEY = 'gazeflow_calibration_v4';
+const STORAGE_KEY = 'gazeflow_calibration_v5';
 
 /** Kernel width for the local correction, as a fraction of anchor spacing. */
 const KERNEL_SIGMA_FACTOR = 0.55;
@@ -97,12 +97,13 @@ export function compensateForHead(
   const dTx = posture.translateX - reference.translateX;
   const dTy = posture.translateY - reference.translateY;
 
-  const rotation = FEATURE_UNITS_PER_RADIAN * gain.rotation;
+  const rotationX = FEATURE_UNITS_PER_RADIAN * gain.rotationX;
+  const rotationY = FEATURE_UNITS_PER_RADIAN * gain.rotationY;
   const translation = FEATURE_UNITS_PER_TRANSLATION * gain.translation;
 
   return {
-    gx: gx + rotation * dYaw + translation * dTx,
-    gy: gy - rotation * dPitch + translation * dTy,
+    gx: gx + rotationX * dYaw + translation * dTx,
+    gy: gy - rotationY * dPitch + translation * dTy,
   };
 }
 
@@ -116,11 +117,29 @@ export function compensateForHead(
  * fitted; otherwise they stay at 1 and the nominal constants are used as-is.
  */
 export interface HeadGain {
-  rotation: number;
+  /** Multiplier on the nominal constant for horizontal, yaw-driven compensation. */
+  rotationX: number;
+  /**
+   * And for vertical, pitch-driven compensation — measured separately, because
+   * it is not the same number.
+   *
+   * The eyelid follows the eye vertically. Look down and the lid comes down with
+   * you, so the visible iris is clipped and its centre is dragged back toward
+   * the middle of the aperture; the vertical feature therefore under-responds to
+   * vertical eye rotation in a way the horizontal one does not. Measured on the
+   * movement pass across three recorded sessions, the horizontal gain came back
+   * at 0.68, 0.65 and 0.83 while the vertical came back at -0.22, -0.25 and
+   * -0.10. Consistent, reproducible, and nothing like each other.
+   *
+   * Averaging them into one figure meant applying a horizontally-derived number
+   * to the vertical axis. In a session whose whole error was a 6.5° drift in
+   * head pitch, that is the one place it could do most harm.
+   */
+  rotationY: number;
   translation: number;
 }
 
-const NOMINAL_HEAD_GAIN: HeadGain = { rotation: 1, translation: 1 };
+const NOMINAL_HEAD_GAIN: HeadGain = { rotationX: 1, rotationY: 1, translation: 1 };
 
 /** Below this spread in the anchors, head gain cannot be identified from them. */
 const MIN_YAW_SPREAD = 0.02;
@@ -728,7 +747,8 @@ export class CalibrationEngine {
     const raw = this.model.headGain ?? NOMINAL_HEAD_GAIN;
     const trust = this.aliasTrust(anchors);
     const effective: HeadGain = {
-      rotation: raw.rotation * trust,
+      rotationX: raw.rotationX * trust,
+      rotationY: raw.rotationY * trust,
       translation: raw.translation * trust,
     };
 
@@ -808,11 +828,7 @@ export class CalibrationEngine {
     );
     if (!horizontal || !vertical) return null;
 
-    const rotationEstimates: Array<{ value: number; weight: number }> = [];
     const translationEstimates: Array<{ value: number; weight: number }> = [];
-
-    if (yawSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: -horizontal[1], weight: yawSpread });
-    if (pitchSpread >= MIN_YAW_SPREAD) rotationEstimates.push({ value: vertical[1], weight: pitchSpread });
     if (horizontalSeparable && txSpread >= MIN_TRANSLATION_SPREAD) {
       translationEstimates.push({ value: -horizontal[2], weight: txSpread });
     }
@@ -851,15 +867,39 @@ export class CalibrationEngine {
       return value / nominal;
     };
 
+    /**
+     * One axis, one plausible range.
+     *
+     * Horizontal is a well-conditioned measurement — the eye sweeps a wide arc
+     * with the iris fully visible — so a figure far from the textbook constant
+     * there is a failed measurement, and the nominal value is the safer answer.
+     * Vertical is not: the lid clips the iris as the eye rolls, so the feature
+     * genuinely under-responds and a small, or slightly negative, gain is the
+     * honest result rather than a broken one. Three recorded sessions returned
+     * -0.22, -0.25 and -0.10 for it. Holding vertical to the horizontal range
+     * would reject all three and substitute a 1 that none of them support.
+     */
+    const axisGain = (
+      slope: number,
+      spread: number,
+      range: { min: number; max: number }
+    ): number => {
+      if (spread < MIN_YAW_SPREAD) return 1;
+      const ratio = slope / FEATURE_UNITS_PER_RADIAN;
+      return ratio >= range.min && ratio <= range.max ? ratio : 1;
+    };
+
     const gain: HeadGain = {
-      rotation: combine(rotationEstimates, FEATURE_UNITS_PER_RADIAN),
+      rotationX: axisGain(-horizontal[1], yawSpread, { min: 0.3, max: 3 }),
+      rotationY: axisGain(vertical[1], pitchSpread, { min: -0.5, max: 3 }),
       translation: combine(translationEstimates, FEATURE_UNITS_PER_TRANSLATION),
     };
 
     this.model.headGain = gain;
     // Exactly nominal on both axes is the fallback, not a measurement, and a
     // fallback must not buy the trust that breaking the aliasing earns.
-    this.model.headGainMeasured = gain.rotation !== 1 || gain.translation !== 1;
+    this.model.headGainMeasured =
+      gain.rotationX !== 1 || gain.rotationY !== 1 || gain.translation !== 1;
     this.refit();
     return gain;
   }

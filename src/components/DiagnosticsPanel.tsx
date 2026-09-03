@@ -288,7 +288,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
               label="Head allowance"
               value={
                 report.calibration.headGain
-                  ? `x${report.calibration.headGain.rotation.toFixed(2)} turn, x${report.calibration.headGain.translation.toFixed(2)} shift`
+                  ? `x${report.calibration.headGain.rotationX.toFixed(2)} turn, ` +
+                    `x${report.calibration.headGain.rotationY.toFixed(2)} nod, ` +
+                    `x${report.calibration.headGain.translation.toFixed(2)} shift`
                   : 'standard'
               }
             />
