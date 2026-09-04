@@ -23,6 +23,7 @@ const store = new Map<string, string>();
   localStorage: (globalThis as any).localStorage,
 };
 
+const { standardiseColumns } = await import('../src/services/linalg');
 const {
   CalibrationEngine,
   setEyelidCueEnabled,
@@ -865,31 +866,37 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
     console.log('FAIL  lid scenario: no mapping returned');
     failures++;
   } else {
-    // The lid must actually cost something, or the scenario is not testing it.
-    const bites = lidded.verticalReach < 0.75;
-    if (!bites) failures++;
+    // A compressed vertical signal must no longer cost *range*. It used to, and
+    // that was the standardisation bug rather than the lid: ridge is
+    // scale-sensitive, the vertical column has roughly an eighth of the
+    // horizontal column's spread, and nothing was actually being standardised,
+    // so the vertical coefficient was shrunk by 70% against the horizontal
+    // column's 4%. A monotonic signal, however compressed, is recoverable by a
+    // larger coefficient — once the penalty stops forbidding one.
+    const keepsRange = lidded.verticalReach > 0.85;
+    if (!keepsRange) failures++;
     console.log(
-      `${bites ? 'ok  ' : 'FAIL'}  the lid collapses vertical reach          ` +
-        `${(healthy.verticalReach * 100).toFixed(0)}% -> ${(lidded.verticalReach * 100).toFixed(0)}%`
+      `${keepsRange ? 'ok  ' : 'FAIL'}  a squashed signal still reaches          ` +
+        `healthy ${(healthy.verticalReach * 100).toFixed(0)}%  lidded ${(lidded.verticalReach * 100).toFixed(0)}%`
     );
 
-    // And the second cue must win most of it back.
-    const recovered =
-      rescued.verticalReach > lidded.verticalReach + 0.15 && rescued.verticalReach > 0.8;
-    if (!recovered) failures++;
+    // What the lid does cost is signal-to-noise, and that is real.
+    const costsAccuracy = lidded.meanDeg > healthy.meanDeg * 1.5;
+    if (!costsAccuracy) failures++;
     console.log(
-      `${recovered ? 'ok  ' : 'FAIL'}  the eyelid cue wins the range back        ` +
-        `${(lidded.verticalReach * 100).toFixed(0)}% -> ${(rescued.verticalReach * 100).toFixed(0)}%`
+      `${costsAccuracy ? 'ok  ' : 'FAIL'}  but it does cost accuracy                ` +
+        `${healthy.meanDeg.toFixed(2)}° -> ${lidded.meanDeg.toFixed(2)}°`
     );
 
-    const better = rescued.meanDeg < lidded.meanDeg;
-    if (!better) failures++;
+    // The cue can still recover some of that on a synthetic eye with a clean
+    // cue. It is off regardless, because on real faces it did the opposite —
+    // 8.56° against 4.22° with the camera on a desk. Recorded here so the gap
+    // between the synthetic case and the real one stays visible.
     console.log(
-      `${better ? 'ok  ' : 'FAIL'}  and the error with it                     ` +
-        `${lidded.meanDeg.toFixed(2)}° -> ${rescued.meanDeg.toFixed(2)}°`
+      `      for reference, a clean cue would give   ` +
+        `${lidded.meanDeg.toFixed(2)}° -> ${rescued.meanDeg.toFixed(2)}° on this synthetic eye`
     );
 
-    // The cue must not be a tax on an eye that never needed it.
     const healthyWithCue = reach('ideal', true);
     const harmless = healthyWithCue !== null && healthyWithCue.meanDeg < healthy.meanDeg * 1.25;
     if (!harmless) failures++;
@@ -943,41 +950,105 @@ for (const [gridName, grid] of Object.entries(GRIDS)) {
       `usesLidCue ${noise.regression?.usesLidCue}`
   );
 
-  // The genuine cue is still taken.
-  const genuine = fitWith(gy => gy);
-  const keptGenuine = genuine.regression?.usesLidCue === true;
-  if (!keptGenuine) failures++;
-  console.log(
-    `${keptGenuine ? 'ok  ' : 'FAIL'}  and a cue that helps is still taken      ` +
-      `usesLidCue ${genuine.regression?.usesLidCue}`
-  );
-
   /*
-   * The case in between is the one that actually bit: a cue carrying real
-   * signal, but not enough of it to pay for what it costs.
+   * Whether a *clean* cue is taken is deliberately not asserted, because it is
+   * a coin flip, and asserting a coin flip is asserting noise.
    *
-   * A sign-flipped cue is not this — a linear fit simply gives it a negative
-   * coefficient, so inverting it proves nothing, and asserting otherwise was a
-   * mistake in an earlier version of this check. What matters is signal-to-noise:
-   * somewhere between a clean cue and pure noise there has to be a crossover
-   * where taking it stops being worth it, and the guard has to find it rather
-   * than accepting anything with a correlation.
+   * An earlier version of this scenario claimed both that a clean cue is taken
+   * and that a clean cue is refused — and both passed, because `gaussian(0)`
+   * still draws from the generator, so two supposedly identical cues were built
+   * on different noise realisations. The finding underneath is that with the
+   * vertical column scaled properly the decision is genuinely marginal: `gy`
+   * carries the mapping on its own, and the cue neither rescues it nor ruins it
+   * on a synthetic eye.
+   *
+   * Which is the point. The cue was introduced to fix a collapse in vertical
+   * reach that turned out to be the standardisation bug — it was compensating
+   * for a penalty the vertical column should never have been paying. On real
+   * faces it then made things considerably worse. That measurement is what
+   * decided it, not this scenario.
    */
-  const decisions = [0, 0.01, 0.02, 0.05, 0.1, 0.2].map(sigma => ({
-    sigma,
-    taken: fitWith(gyv => gyv + gaussian(sigma)).regression?.usesLidCue === true,
-  }));
-  const firstRefusal = decisions.findIndex(d => !d.taken);
-  const crossoverExists =
-    firstRefusal > 0 && decisions.slice(firstRefusal).every(d => !d.taken);
-  if (!crossoverExists) failures++;
+  const cleanCue = fitWith(gy => gy);
   console.log(
-    `${crossoverExists ? 'ok  ' : 'FAIL'}  noisier cues stop being worth taking     ` +
-      decisions.map(d => `${d.sigma}:${d.taken ? 'take' : 'drop'}`).join('  ')
+    `      a clean cue is now marginal either way   ` +
+      `taken=${cleanCue.regression?.usesLidCue}, and the reach it once rescued no longer needs it`
   );
 }
 
 setEyelidCueEnabled(false);
+
+/**
+ * Standardisation has to actually standardise.
+ *
+ * This is the tightest guard on the worst bug in the file it protects. The
+ * variance accumulator was initialised to 1 — the fallback divisor for a column
+ * with no spread — and then summed squared deviations on top of it, so every
+ * column came back at sqrt((1 + spread) / n). With nine anchors that is 0.333
+ * for a constant column and 0.334 for the vertical gaze column, whose real
+ * spread is 0.011. Nothing was standardised; every column was divided by a third.
+ *
+ * Ridge regression is scale-sensitive, which is the only reason to standardise
+ * before it. So the penalty fell on the columns wildly unevenly: horizontal
+ * gaze, with about eight times the spread, lost 4% of its coefficient, and
+ * vertical gaze lost 70%. That is the vertical under-reach that has been in
+ * every session since the model was written, and the reason an eyelid cue
+ * appeared to help — it supplied a second vertical column with enough spread to
+ * survive a penalty the first one was being crushed by.
+ *
+ * The symptom tests above would catch a regression eventually. This one catches
+ * it immediately, and says what broke.
+ */
+{
+  console.log('\n--- Standardisation ---');
+
+  // Two columns with very different spreads, plus a constant.
+  const rows = [
+    [1, 10.0, 0.10],
+    [1, 20.0, 0.12],
+    [1, 30.0, 0.14],
+    [1, 40.0, 0.16],
+  ];
+  const { mean, std } = standardiseColumns(rows);
+
+  const truth = (col: number) => {
+    const vals = rows.map(r => r[col]);
+    const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+    return Math.sqrt(vals.reduce((s2, v) => s2 + (v - m) ** 2, 0) / vals.length);
+  };
+
+  const wide = Math.abs(std[1] - truth(1)) < 1e-9;
+  const narrow = Math.abs(std[2] - truth(2)) < 1e-12;
+  const constant = std[0] === 1;
+  const meansRight = Math.abs(mean[1] - 25) < 1e-9 && Math.abs(mean[2] - 0.13) < 1e-9;
+
+  for (const [ok, label, got, want] of [
+    [wide, 'a wide column reports its own spread   ', std[1], truth(1)],
+    [narrow, 'so does a narrow one                   ', std[2], truth(2)],
+    [constant, 'a constant column falls back to 1      ', std[0], 1],
+  ] as Array<[boolean, string, number, number]>) {
+    if (!ok) failures++;
+    console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}  ${got.toPrecision(6)}  (want ${want.toPrecision(6)})`);
+  }
+  if (!meansRight) failures++;
+  console.log(`${meansRight ? 'ok  ' : 'FAIL'}  and the means are the means             ${mean[1]}, ${mean[2]}`);
+
+  // The property that actually matters downstream: after standardising, two
+  // columns of wildly different raw scale must present the same spread to the
+  // penalty, or ridge silently prefers whichever one happened to be measured in
+  // bigger units.
+  const scaled = rows.map(r => r.map((v, i) => (i === 0 ? 1 : (v - mean[i]) / std[i])));
+  const spread = (col: number) => {
+    const vals = scaled.map(r => r[col]);
+    const m = vals.reduce((a, b) => a + b, 0) / vals.length;
+    return Math.sqrt(vals.reduce((s2, v) => s2 + (v - m) ** 2, 0) / vals.length);
+  };
+  const evened = Math.abs(spread(1) - spread(2)) < 1e-9 && Math.abs(spread(1) - 1) < 1e-9;
+  if (!evened) failures++;
+  console.log(
+    `${evened ? 'ok  ' : 'FAIL'}  and the penalty then falls evenly       ` +
+      `${spread(1).toFixed(4)} vs ${spread(2).toFixed(4)} (raw scales differ by ${(truth(1) / truth(2)).toFixed(0)}x)`
+  );
+}
 
 /**
  * Every row has to be captured early, in the middle, and late.
