@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Check, Copy, X } from 'lucide-react';
 import { FaceMeshTracker } from '../services/faceMeshTracker';
 import { calibrationEngine } from '../services/calibration';
+import { driftGuard } from '../services/driftGuard';
 import { viewingGeometry } from '../services/viewingGeometry';
 import { useThrottledGaze } from '../services/gazeBus';
 
@@ -111,6 +112,9 @@ export const DiagnosticsPanel: React.FC<DiagnosticsPanelProps> = ({ isOpen, trac
       degree: model.regression?.degree ?? null,
       headGain: model.headGain ?? null,
       usesEyelidCue: model.regression?.usesLidCue ?? null,
+      nudgeXNorm: Number((model.nudgeXNorm ?? 0).toFixed(4)),
+      nudgeYNorm: Number((model.nudgeYNorm ?? 0).toFixed(4)),
+      driftCorrection: driftGuard.getState(),
       // Pessimistic by roughly 3.5x against known truth; useful for comparing
       // models on the same points, not as an accuracy figure. See docs/accuracy.md.
       leaveOneOutErrorPx: model.quality ? Number(model.quality.crossValidatedErrorPx.toFixed(1)) : null,

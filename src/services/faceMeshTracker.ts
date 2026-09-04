@@ -39,6 +39,7 @@ export const DEFAULT_TRACKING_SETTINGS: TrackingSettings = {
   invertX: false,
   invertY: false,
   holdThroughBlinks: true,
+  autoDriftCorrection: true,
   minConfidence: 0.2,
   penMode: 'auto_stream',
   audioEnabled: true,

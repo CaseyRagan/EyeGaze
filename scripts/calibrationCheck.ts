@@ -1234,5 +1234,115 @@ setEyelidCueEnabled(false);
 
 }
 
+/**
+ * Drift correction has to converge, and has to refuse to.
+ *
+ * This is a feedback loop wired into the calibration, driven by the app's own
+ * output, so the interesting properties are not that it works but that it
+ * cannot run away. A client reported the shape of the problem it exists for:
+ * re-centre, play well for about a minute, feel it slide, re-centre again.
+ */
+{
+  console.log('\n--- Drift correction ---');
+
+  const { driftGuard } = await import('../src/services/driftGuard');
+  const { calibrationEngine: engine } = await import('../src/services/calibration');
+
+  const W = 1456;
+  const H = 949;
+  (globalThis as any).window.innerWidth = W;
+  (globalThis as any).window.innerHeight = H;
+
+  // A calibrated engine, so the guard will act at all.
+  reseed();
+  engine.reset();
+  GRIDS['9-point'].forEach(([x, y], i) => {
+    engine.addAnchorFromSamples(`p${i}`, x, y, makeSamples(x, y, 0.0016));
+  });
+
+  const nudgeY = () => engine.getModel().nudgeYNorm ?? 0;
+  const feed = (n: number, dx: number, dy: number, scatter = 0) => {
+    for (let i = 0; i < n; i++) {
+      driftGuard.observe(
+        W / 2 + dx + gaussian(scatter),
+        H / 2 + dy + gaussian(scatter),
+        W / 2,
+        H / 2
+      );
+    }
+  };
+
+  // 1. A steady offset in one direction is corrected, and in the right direction.
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+  feed(20, 0, 40);
+  const corrected = nudgeY();
+  const rightWay = corrected < -0.005;
+  if (!rightWay) failures++;
+  console.log(
+    `${rightWay ? 'ok  ' : 'FAIL'}  a steady miss is pulled back             ` +
+      `gaze 40px low -> nudge ${(corrected * H).toFixed(0)}px up after 20 hits`
+  );
+
+  // 2. It converges rather than overshooting: keep feeding the *same* residual
+  //    and it must approach, not sail past.
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+  let residual = 40;
+  for (let round = 0; round < 12; round++) {
+    feed(5, 0, residual);
+    residual = 40 + nudgeY() * H;
+  }
+  const settled = Math.abs(residual);
+  const converged = settled < 15;
+  if (!converged) failures++;
+  console.log(
+    `${converged ? 'ok  ' : 'FAIL'}  and converges rather than overshooting   ` +
+      `residual ${settled.toFixed(1)}px after 12 rounds`
+  );
+
+  // 3. Misses scattered evenly around a target are noise, not drift.
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+  feed(40, 0, 0, 45);
+  const fromNoise = Math.abs(nudgeY() * H);
+  const ignoredNoise = fromNoise < 8;
+  if (!ignoredNoise) failures++;
+  console.log(
+    `${ignoredNoise ? 'ok  ' : 'FAIL'}  scattered misses move nothing            ` +
+      `${fromNoise.toFixed(1)}px of nudge from 40 scattered hits`
+  );
+
+  // 4. And it can never walk away from the calibrated mapping, however long it
+  //    runs or however wrong the observations are.
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+  for (let i = 0; i < 60; i++) feed(5, 0, 150);
+  const walked = Math.abs(nudgeY());
+  const capped = walked <= 0.0801;
+  if (!capped) failures++;
+  console.log(
+    `${capped ? 'ok  ' : 'FAIL'}  and is capped however long it runs       ` +
+      `${(walked * 100).toFixed(1)}% of screen height after 300 hits all 150px low (cap 8%)`
+  );
+
+  // 5. Switched off, it does nothing at all.
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+  driftGuard.setEnabled(false);
+  feed(20, 0, 40);
+  const whileOff = Math.abs(nudgeY());
+  driftGuard.setEnabled(true);
+  const inert = whileOff === 0;
+  if (!inert) failures++;
+  console.log(
+    `${inert ? 'ok  ' : 'FAIL'}  and does nothing when switched off       ` +
+      `${(whileOff * H).toFixed(1)}px`
+  );
+
+  driftGuard.reset();
+  engine.setNudge(0, 0);
+}
+
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

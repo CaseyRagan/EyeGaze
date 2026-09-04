@@ -290,6 +290,11 @@ export interface TrackingSettings {
   invertY: boolean;
   /** Hold the last estimate through blinks instead of letting it jump. */
   holdThroughBlinks: boolean;
+  /**
+   * Nudge the mapping back into place during play, using the fixations that
+   * completed dwells already prove. Off means the client re-centres by hand.
+   */
+  autoDriftCorrection: boolean;
   /** Drop frames whose confidence falls below this threshold. */
   minConfidence: number;
   penMode: PenActivationMode;

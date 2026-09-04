@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { gazeBus } from '../services/gazeBus';
+import { driftGuard } from '../services/driftGuard';
 import { GazeState } from '../types';
 
 export interface DwellTarget {
@@ -60,7 +61,22 @@ export function useGazeDwell({
   const assistRef = useRef(assistRadius);
   assistRef.current = assistRadius;
 
-  const activeRef = useRef<{ id: string; startedAt: number; firstDistance: number } | null>(null);
+  /*
+   * The gaze is summed over the dwell as well as timed, because a dwell that
+   * completes is the strongest statement this app ever gets about where someone
+   * was actually looking — held inside a known target for the full duration.
+   * Where the estimate sat on average during that hold, against where the target
+   * really was, is a free measurement of the constant error, several times a
+   * minute, without anybody stopping to re-centre. See driftGuard.
+   */
+  const activeRef = useRef<{
+    id: string;
+    startedAt: number;
+    firstDistance: number;
+    sumX: number;
+    sumY: number;
+    samples: number;
+  } | null>(null);
   const lastEmitRef = useRef(0);
   const lastPublishedIdRef = useRef<string | null>(null);
   const gazeRef = useRef<GazeState | null>(null);
@@ -106,10 +122,22 @@ export function useGazeDwell({
           : Infinity;
 
         if (stillOn && distanceToCurrent <= stillOn.radius + assistRef.current) {
+          current.sumX += gaze.screenX;
+          current.sumY += gaze.screenY;
+          current.samples++;
+
           const elapsed = now - current.startedAt;
           if (elapsed >= dwellMsRef.current) {
             activeRef.current = null;
             publish(null, 0, distanceToCurrent);
+            if (current.samples > 0) {
+              driftGuard.observe(
+                current.sumX / current.samples,
+                current.sumY / current.samples,
+                stillOn.x,
+                stillOn.y
+              );
+            }
             onSelectRef.current(current.id, {
               dwellMs: elapsed,
               firstDistance: current.firstDistance,
@@ -129,7 +157,14 @@ export function useGazeDwell({
         // stall: an in-progress dwell rides through it, and starting one is
         // fine because the held position is still where they were looking.
         if (!gaze.isVisiblyInterrupted) {
-          activeRef.current = { id: nearest.id, startedAt: now, firstDistance: nearestDistance };
+          activeRef.current = {
+            id: nearest.id,
+            startedAt: now,
+            firstDistance: nearestDistance,
+            sumX: 0,
+            sumY: 0,
+            samples: 0,
+          };
         }
         publish(nearest.id, 0, nearestDistance);
       } else {

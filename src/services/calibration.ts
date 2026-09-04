@@ -691,6 +691,20 @@ export class CalibrationEngine {
     return this.model.posture;
   }
 
+  /**
+   * Moves the constant offset by a small amount, rather than replacing it.
+   *
+   * setNudge is absolute because a manual re-centre recomputes the whole offset
+   * from one fresh fixation. Continuous drift correction is the opposite: many
+   * tiny observations, each nudging what is already there. Keeping them separate
+   * means neither has to know about the other, and a manual re-centre still
+   * wipes the slate exactly as it always did.
+   */
+  public adjustNudge(dxNorm: number, dyNorm: number) {
+    if (!Number.isFinite(dxNorm) || !Number.isFinite(dyNorm)) return;
+    this.setNudge(this.model.nudgeXNorm + dxNorm, this.model.nudgeYNorm + dyNorm);
+  }
+
   public setNudge(xNorm: number, yNorm: number) {
     this.model.nudgeXNorm = xNorm;
     this.model.nudgeYNorm = yNorm;

@@ -244,6 +244,13 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               checked={settings.holdThroughBlinks}
               onChange={v => onUpdateSettings({ holdThroughBlinks: v })}
             />
+
+            <Toggle
+              label="Keep itself centred during play"
+              detail="Every target held long enough to select proves where the client was looking, so the aim is corrected as you go instead of stopping to re-centre. It only ever moves the aim, never the shape of the calibration, and never far."
+              checked={settings.autoDriftCorrection}
+              onChange={v => onUpdateSettings({ autoDriftCorrection: v })}
+            />
           </Section>
 
           <Section title="What you see" description="" icon={Sun}>
