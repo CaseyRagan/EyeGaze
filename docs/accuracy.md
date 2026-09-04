@@ -1333,6 +1333,49 @@ further away than the target is wide.
 Driven end to end in a browser: an uncalibrated session starts on medium, and one
 that has just calibrated at 0.0° starts on small.
 
+## Re-centring was correcting toward a point nobody was looking at
+
+The one-point drift correction does what it should in principle: show a dot,
+have the client look at it, and take the difference between where the model
+thinks they are looking and where the dot is as a constant offset to subtract.
+A single fixation is enough to remove the largest part of the error that
+accumulates when somebody shifts in the chair, and it is far less disruptive
+than starting the whole set-up again.
+
+The dot was in the wrong place.
+
+It was laid out as the first child of a centred column — dot, then a caption,
+then a cancel button — so the *column* was centred and the dot sat above the
+middle of the screen. Measured in a browser at 1456x949, the dot's centre was at
+y = 433 against a true screen centre of 475: **42 px high**. Meanwhile
+`applyDriftCorrection` was being handed a hard-coded `0.5, 0.5`.
+
+So the client looked at the dot, the engine was told they had looked at the
+centre, and the correction dutifully absorbed the difference. At 47 cm on a
+14.2-inch screen that is about **a degree of downward error, added by the one
+feature whose entire job is to remove error**, every time it was used — against a
+tracker whose best measured session is 2.27°.
+
+Two changes, and the second matters more than the first. The dot is now
+positioned against the viewport rather than flowed in a column, so it is
+genuinely in the middle of the screen — which is what the client is being asked
+to look at. And the target handed to the correction is now *read back off the
+element* with `getBoundingClientRect`, so the position reported and the position
+drawn cannot disagree again, whatever anyone later does to the layout.
+
+Verified by driving it: with a 0.0° calibration and the eye held at a known
+offset, re-centring from dead centre reports "already well centred", re-centring
+from 120 px below reports "re-centred by 120 px", and returning to centre reports
+"already well centred" again — the correction is absolute rather than cumulative,
+so each one replaces the last rather than stacking.
+
+This is the third instance of the same fault: a target drawn in one coordinate
+space and reported in another. The calibration dots had it, via a flex container
+that sat below the header; the check grid inherited it; and now this. The common
+cause is a *hard-coded* position that has to agree with a *laid-out* one, and the
+general fix is the one used here — measure what was drawn instead of asserting
+where it should be.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
