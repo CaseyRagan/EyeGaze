@@ -1125,6 +1125,88 @@ it is captured while the client is still square on, and it is the anchor the
 whole mapping pivots around. Consecutive points also end up far apart, which
 makes each move a real saccade rather than a drift along a row.
 
+## Nothing was ever standardised
+
+The vertical channel has under-reached in every recorded session — 50%, 55%,
+63%, 66% — while the horizontal channel sat between 86% and 103%. Three separate
+explanations were offered for that over several days: the eyelid hiding the iris,
+the check grid being too narrow, the capture order aliasing posture with row. The
+first two were wrong and the third was real but minor.
+
+The actual cause was five lines in `standardiseColumns`:
+
+```js
+const std = new Array(k).fill(1);   // fallback for a column with no spread
+...
+std[i] += d * d;                    // ...and then used as the accumulator
+```
+
+The variance accumulator was initialised to 1 and then had squared deviations
+summed on top of it, so every column came back as `sqrt((1 + spread) / n)`
+instead of `sqrt(spread / n)`. With nine anchors that is 0.3333 for a constant
+column and 0.3336 for the vertical gaze column, whose real spread is 0.011.
+Nothing was standardised. Every column was divided by roughly a third.
+
+Ridge regression is scale-sensitive — that is the entire reason to standardise
+before it — so the penalty fell on the columns wildly unevenly:
+
+| column | real spread | shrinkage under λ = 0.022 |
+|---|---|---|
+| horizontal gaze | 0.086 | **4%** |
+| vertical gaze | 0.011 | **70%** |
+
+Measured on a real session, the fitted vertical slope was 9.0 screen-fractions
+per feature unit where a plain least-squares line through the same anchors gives
+29.9. The mapping was being told, by the regulariser, not to believe the vertical
+axis.
+
+### What that means for everything above
+
+The eyelid cue "worked" on the synthetic eye because it supplied a *second*
+vertical column with enough spread to survive a penalty the first one was being
+crushed by. It was compensating for this bug, not for the eyelid. With the
+scaling fixed, the check scenario that showed vertical reach collapsing from 90%
+to 30% now shows 101% to 107% — a compressed but monotonic signal is perfectly
+recoverable by a larger coefficient, once the penalty stops forbidding one. What
+the lid actually costs is signal-to-noise (0.17° to 0.50° on the synthetic eye),
+not range.
+
+The "upper half of the screen is nearly blind" measurement was also mostly
+wrong, and for the separate reason above: with raster capture, the top row was
+taken first and the bottom last, so posture drift was aliased with row. Balanced
+capture put the vertical response at 0.036 per unit over the top half against
+0.031 over the bottom — symmetric, where the confounded measurement had said
+0.017 against 0.064.
+
+### Effect on real recordings
+
+Every session replayed under the fix, scored on its own check points, in pixels
+(distance-independent, since the distance estimate is itself unstable):
+
+| session | before | after |
+|---|---|---|
+| earlier session | 119 px | **73 px** |
+| camera on desk | 202 px | 190 px |
+| camera at eye level | 125 px | 146 px |
+| latest, run 1 | 143 px | **79 px** |
+| latest, run 2 | 163 px | 214 px |
+
+The mean improves modestly, and two sessions get worse. That is not a
+contradiction: the broken shrinkage was pulling every estimate toward the centre
+of the screen, which incidentally damped the error from anything that shifted
+between calibration and check. Removing it makes the mapping faithful to what it
+was taught, including any head drift. Run 2 has 3.4° of pitch drift between the
+grid and the check, and now pays for it in full.
+
+Synthetically, where there is no drift to be faithful to, everything improved by
+two to three times at once: the nine-point grid under realistic noise went from
+0.60° to 0.17°, outlier recovery from 2.04°→0.92° to 1.80°→0.18°, and the
+lean-in distance case from 0.49° to 0.21°.
+
+So the next thing to attack is head pitch drift between the grid and the check,
+which was previously hidden underneath a regulariser that was quietly discarding
+the vertical axis.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five

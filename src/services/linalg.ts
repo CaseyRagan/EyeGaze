@@ -73,6 +73,18 @@ export function ridgeSolve(phi: number[][], y: number[], lambda: number): number
 export function standardiseColumns(rows: number[][]): { mean: number[]; std: number[] } {
   const k = rows[0]?.length ?? 0;
   const mean = new Array(k).fill(0);
+  // Accumulates from zero. It used to start at 1 — the fallback value for a
+  // column with no variance — and then sum the squared deviations on top of it,
+  // so every column came back at sqrt((1 + spread) / n) instead of
+  // sqrt(spread / n). With nine anchors that is 0.333 for a column with no
+  // spread at all, and 0.3336 for the vertical gaze column, whose real spread is
+  // 0.011. Nothing was standardised; every column was simply divided by a third.
+  //
+  // Ridge regression is scale-sensitive — that is the entire reason for
+  // standardising before it — so the columns kept their raw scales and the
+  // penalty fell on them wildly unevenly. Horizontal gaze, with roughly eight
+  // times the spread, was shrunk by 4%. Vertical gaze was shrunk by 70%.
+  const variance = new Array(k).fill(0);
   const std = new Array(k).fill(1);
   if (rows.length === 0) return { mean, std };
 
@@ -84,12 +96,15 @@ export function standardiseColumns(rows: number[][]): { mean: number[]; std: num
   for (const row of rows) {
     for (let i = 0; i < k; i++) {
       const d = row[i] - mean[i];
-      std[i] += d * d;
+      variance[i] += d * d;
     }
   }
   for (let i = 0; i < k; i++) {
-    std[i] = Math.sqrt(std[i] / Math.max(1, rows.length));
-    if (!Number.isFinite(std[i]) || std[i] < 1e-6) std[i] = 1;
+    const s = Math.sqrt(variance[i] / Math.max(1, rows.length));
+    // A column that genuinely does not vary — the intercept — keeps a divisor of
+    // 1 rather than blowing up. That is what the initial fill is for, and it has
+    // to stay separate from the accumulator to mean it.
+    std[i] = Number.isFinite(s) && s > 1e-6 ? s : 1;
   }
   return { mean, std };
 }
