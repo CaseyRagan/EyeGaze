@@ -3,6 +3,7 @@ import { ArrowRight, RotateCcw } from 'lucide-react';
 import { ConstellationLevel } from '../../types';
 import { soundEngine } from '../../services/audio';
 import { DwellTarget, useGazeDwell } from '../../hooks/useGazeDwell';
+import { assistRadiusFor } from '../../services/trackerReach';
 import { viewingGeometry } from '../../services/viewingGeometry';
 
 const LEVELS: ConstellationLevel[] = [
@@ -109,7 +110,9 @@ export const ConstellationTask: React.FC = () => {
   const dwell = useGazeDwell({
     targets,
     dwellMs: 550,
-    assistRadius: 28,
+    // The tracker's measured error rather than a guess at it, capped at the
+    // star's own radius so the dots stay distinguishable from each other.
+    assistRadius: assistRadiusFor(STAR_RADIUS),
     enabled: !isComplete,
     onSelect: (id, info) => {
       setLatencies(l => [...l, Math.max(0, performance.now() - revealedAtRef.current - info.dwellMs)]);

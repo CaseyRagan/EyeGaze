@@ -24,6 +24,9 @@ const store = new Map<string, string>();
 };
 
 const { standardiseColumns } = await import('../src/services/linalg');
+const { assistRadiusFor, reachFor, radiusIsComfortable, defaultSizeIndex } = await import(
+  '../src/services/trackerReach'
+);
 const {
   CalibrationEngine,
   setEyelidCueEnabled,
@@ -1166,6 +1169,69 @@ setEyelidCueEnabled(false);
 
   viewingGeometry.clearMeasuredDistance();
   viewingGeometry.updateSettings({ useMeasuredDistance: false });
+}
+
+/**
+ * What the set-up measured has to reach the activities.
+ *
+ * All the calibration work does carry over to the games — there is one tracking
+ * path, and the accuracy figure is measured from the same live marker the
+ * activities read. What did not carry over was the *answer*: every activity
+ * carried a hand-picked assist margin and Find-and-hold hard-coded medium as its
+ * default, so a client measured at 103 px of error was dropped into targets with
+ * 79 px of reach and could not make them fire.
+ *
+ * Two properties matter and neither is obvious enough to leave to a comment.
+ */
+{
+  console.log('\n--- What set-up measured has to reach the activities ---');
+
+  const SIZES = [62, 44, 30];
+
+  // Stands in for a measured session without running one: the reach helpers read
+  // only the accuracy figure, so that is all this needs to supply.
+  const { calibrationEngine } = await import('../src/services/calibration');
+  const setError = (px: number) => {
+    calibrationEngine.recordValidation({ accuracyPx: px } as any);
+  };
+
+  // 1. Sizes must stay distinguishable however bad the tracking is. Handing
+  //    every size the full measured error is the obvious reading of "forgive
+  //    what the instrument gets wrong", and at 103 px it puts large, medium and
+  //    small within 20% of each other — three settings that no longer differ.
+  setError(103);
+  const reaches = SIZES.map(r => reachFor(r));
+  const ordered = reaches[0] > reaches[1] && reaches[1] > reaches[2];
+  const spread = reaches[0] / reaches[2];
+  const stillDiffer = ordered && spread > 1.6;
+  if (!stillDiffer) failures++;
+  console.log(
+    `${stillDiffer ? 'ok  ' : 'FAIL'}  sizes stay apart at 103px of error       ` +
+      `reach ${reaches.map(r => r.toFixed(0)).join(' / ')} px  (largest is ${spread.toFixed(1)}x the smallest)`
+  );
+
+  // 2. The default has to be a size the measurement supports.
+  for (const [errPx, expect] of [[103, 'large'], [40, 'medium'], [12, 'small']] as Array<[number, string]>) {
+    setError(errPx);
+    const idx = defaultSizeIndex(SIZES);
+    const label = ['large', 'medium', 'small'][idx];
+    const right = label === expect;
+    if (!right) failures++;
+    console.log(
+      `${right ? 'ok  ' : 'FAIL'}  at ${String(errPx).padStart(3)}px it starts on ${label.padEnd(7)}` +
+        `(comfortable: ${SIZES.filter(r => radiusIsComfortable(r)).length}/3 sizes)`
+    );
+  }
+
+  // 3. And the assist can never swallow the target it is forgiving around.
+  setError(500);
+  const capped = SIZES.every(r => assistRadiusFor(r) <= r);
+  if (!capped) failures++;
+  console.log(
+    `${capped ? 'ok  ' : 'FAIL'}  and never exceeds the target radius      ` +
+      `assist ${SIZES.map(r => assistRadiusFor(r).toFixed(0)).join(' / ')} px at an absurd 500px error`
+  );
+
 }
 
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);

@@ -3,6 +3,13 @@ import { RotateCcw, Timer } from 'lucide-react';
 import { soundEngine } from '../../services/audio';
 import { useGazeDwell, DwellTarget } from '../../hooks/useGazeDwell';
 import { viewingGeometry } from '../../services/viewingGeometry';
+import {
+  assistRadiusFor,
+  defaultSizeIndex,
+  radiusIsComfortable,
+  trackerErrorIsMeasured,
+  trackerErrorPx,
+} from '../../services/trackerReach';
 
 interface TargetPopTaskProps {
   dwellDurationMs: number;
@@ -21,9 +28,9 @@ const HUES = ['var(--color-sage-400)', 'var(--color-clay-400)', 'var(--color-sky
 
 /** Difficulty is expressed as target size, because that is what generalises. */
 const SIZES = [
-  { id: 'large', label: 'Large', radius: 62, assist: 55 },
-  { id: 'medium', label: 'Medium', radius: 44, assist: 35 },
-  { id: 'small', label: 'Small', radius: 30, assist: 18 },
+  { id: 'large', label: 'Large', radius: 62 },
+  { id: 'medium', label: 'Medium', radius: 44 },
+  { id: 'small', label: 'Small', radius: 30 },
 ];
 
 /**
@@ -37,7 +44,10 @@ const SIZES = [
  * smaller-looking.
  */
 export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ dwellDurationMs }) => {
-  const [sizeIndex, setSizeIndex] = useState(1);
+  // Starts on the most demanding size the set-up actually supports, rather than
+  // always on medium. A client measured at 103 px of error used to be dropped
+  // into 79 px targets and left to wonder why nothing fired.
+  const [sizeIndex, setSizeIndex] = useState(() => defaultSizeIndex(SIZES.map(s => s.radius)));
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
   const [completed, setCompleted] = useState(0);
   const [acquireTimes, setAcquireTimes] = useState<number[]>([]);
@@ -90,7 +100,7 @@ export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ dwellDurationMs })
   const dwell = useGazeDwell({
     targets,
     dwellMs: dwellDurationMs,
-    assistRadius: size.assist,
+    assistRadius: assistRadiusFor(size.radius),
     onSelect: (id, info) => {
       const bubble = bubbles.find(b => b.id === id);
       if (!bubble) return;
@@ -114,18 +124,44 @@ export const TargetPopTask: React.FC<TargetPopTaskProps> = ({ dwellDurationMs })
 
   return (
     <div ref={containerRef} className="absolute inset-0 overflow-hidden">
-      <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2 surface rounded-full px-2 py-1.5">
-        {SIZES.map((s, i) => (
-          <button
-            key={s.id}
-            onClick={() => setSizeIndex(i)}
-            className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              sizeIndex === i ? 'bg-sage-100 text-sage-700' : 'text-ink-soft hover:text-ink'
-            }`}
-          >
-            {s.label}
-          </button>
-        ))}
+      <div className="absolute top-5 left-1/2 -translate-x-1/2 z-10 flex flex-col items-center gap-1.5">
+        <div className="flex items-center gap-2 surface rounded-full px-2 py-1.5">
+          {SIZES.map((s, i) => {
+            /*
+              A size the set-up cannot support is still offered — a client may
+              want to try, and a clinician may want to see them try — but it is
+              marked, because the alternative is what happened before: someone
+              looking straight at a target that will not fire, with nothing on
+              screen to say the marker is landing further away than the target
+              is wide.
+            */
+            const beyond = !radiusIsComfortable(s.radius);
+            return (
+              <button
+                key={s.id}
+                onClick={() => setSizeIndex(i)}
+                title={beyond ? 'Beyond what this set-up measured' : undefined}
+                className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                  sizeIndex === i
+                    ? 'bg-sage-100 text-sage-700'
+                    : beyond
+                      ? 'text-ink-faint hover:text-ink-soft'
+                      : 'text-ink-soft hover:text-ink'
+                }`}
+              >
+                {s.label}
+                {beyond && <span className="ml-1 text-honey-700">·</span>}
+              </button>
+            );
+          })}
+        </div>
+        {!radiusIsComfortable(SIZES[sizeIndex].radius) && (
+          <p className="text-xs text-honey-700 bg-[var(--surface)] rounded-full px-3 py-1">
+            {trackerErrorIsMeasured()
+              ? `Set-up measured about ${Math.round(trackerErrorPx())} px of error, so this size will be hard to land. Try a larger one, or run set-up again.`
+              : 'No set-up yet, so this is a guess at how much to forgive. Run set-up for targets that match your tracking.'}
+          </p>
+        )}
       </div>
 
       {bubbles.map(bubble => {

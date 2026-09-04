@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CornerUpLeft, Delete, Trash2, Volume2 } from 'lucide-react';
 import { soundEngine } from '../../services/audio';
 import { DwellTarget, useGazeDwell } from '../../hooks/useGazeDwell';
+import { assistRadiusFor } from '../../services/trackerReach';
 
 interface GazeTypingTaskProps {
   dwellDurationMs: number;
@@ -150,7 +151,16 @@ export const GazeTypingTask: React.FC<GazeTypingTaskProps> = ({ dwellDurationMs 
     [tiles, speak]
   );
 
-  const dwell = useGazeDwell({ targets, dwellMs: dwellDurationMs, assistRadius: 20, onSelect: handleSelect });
+  // Letter tiles sit shoulder to shoulder, so the assist is capped at half a
+  // tile: a margin wider than the gap between two tiles would let a gaze that
+  // landed on "S" select "D", which is worse for a speller than a missed dwell.
+  const tileRadius = targets.length > 0 ? targets[0].radius : 20;
+  const dwell = useGazeDwell({
+    targets,
+    dwellMs: dwellDurationMs,
+    assistRadius: Math.min(assistRadiusFor(tileRadius), tileRadius * 0.5),
+    onSelect: handleSelect,
+  });
 
   const iconFor = (tile: Tile) => {
     if (tile.kind !== 'action') return null;
