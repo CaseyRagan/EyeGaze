@@ -1376,6 +1376,76 @@ cause is a *hard-coded* position that has to agree with a *laid-out* one, and th
 general fix is the one used here — measure what was drawn instead of asserting
 where it should be.
 
+## Drift, not calibration, is what limits a real sitting
+
+The clearest diagnosis of this whole project came from the person using it:
+*re-centre, and it works much better — for a minute. Then it slowly loses it and
+I have to re-centre again.*
+
+That is not a calibration problem, and the numbers agree. The session behind that
+report cross-validated at **65 px**, the best yet by a wide margin, with coverage
+1.00 and one bad point correctly pruned. The fit is good. What moves is
+everything after it: head pitch drifted 2.29° between the grid and the check
+twenty seconds later, and a sitting lasts minutes.
+
+Head-pose compensation removes part of that and cannot remove all of it — the
+residual gains are small but they multiply a posture that keeps changing. A
+manual re-centre removes the rest, which is why it works, and why it stops
+working again.
+
+### Every completed dwell is a calibration point nobody sat through
+
+The observation that fixes this is that the app already knows where somebody was
+looking, several times a minute, for free. A dwell only completes when a gaze has
+been held inside a known target for the full dwell duration — about as strong a
+statement as eye tracking ever gets that a person was looking at a specific
+place. Where the estimate sat during that hold, against where the target really
+was, is a direct measurement of the constant error.
+
+So `driftGuard` gathers those, and every seven of them it moves the aim a little.
+The obvious danger is a loop that reinforces its own error, and every guard
+exists to stop one bad observation moving anything:
+
+- only completed dwells count, never a near miss
+- the median of seven is used, so a single odd hit cannot steer it
+- the offset must clear **2.5 standard errors** of its own scatter
+- only 30% of the measured offset is applied
+- the total it may ever accumulate is capped at 8% of the screen
+- and it moves the aim only — never the shape of the mapping, which stays exactly
+  as set-up measured it
+
+That significance test replaced a first attempt that compared the offset against
+the mean *distance* of the misses, on the theory that misses sharing a direction
+are drift while scattered ones cancel. They do cancel — on average. The median of
+seven scattered observations has a standard error of its own, and in a check that
+fed forty evenly scattered hits, the ratio test let through 20 px of correction
+built from nothing but chance. Comparing the offset against its own uncertainty
+takes that to 0 px, and leaves a real repeated miss untouched.
+
+### What it does, measured
+
+In the check suite, against a synthetic engine: a steady 40 px miss is pulled
+back, a repeated residual converges to under 8 px rather than overshooting,
+forty scattered hits move it 0 px, three hundred hits all 150 px low stop at the
+8% cap, and switching it off makes it completely inert.
+
+Driven in the real app: playing with a deliberate constant 30 px downward aiming
+error — exactly what a drifted mapping produces — twenty-six completed targets
+applied **−27.0 px** of vertical correction and 0.006 px of horizontal. It found
+the drift and removed it, without anyone stopping.
+
+### The honest limit
+
+It maintains a good mapping. It cannot rescue a broken one.
+
+Trying the same test on the small targets showed why, usefully: with the aim
+45 px off and a reach of 38 px, *nothing completes*, so there are no observations
+and no correction is possible. Drift correction needs dwells to keep landing in
+order to see anything at all, which means it stops slow drift from ever becoming
+a problem but cannot recover from drift that has already outgrown the targets.
+That case is what the manual re-centre is for, and the two are complementary
+rather than alternatives.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five

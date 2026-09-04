@@ -28,6 +28,7 @@ import { GazePointer } from './components/GazePointer';
 import { CameraPreview } from './components/CameraPreview';
 import { CalibrationFlow } from './components/CalibrationFlow';
 import { RecentreOverlay } from './components/RecentreOverlay';
+import { driftGuard } from './services/driftGuard';
 import { SettingsPanel } from './components/SettingsPanel';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { HeadAlignmentGuide } from './components/HeadAlignmentGuide';
@@ -105,6 +106,10 @@ export default function App() {
   useEffect(() => {
     setSpeechEnabled(settings.spokenPrompts);
   }, [settings.spokenPrompts]);
+
+  useEffect(() => {
+    driftGuard.setEnabled(settings.autoDriftCorrection);
+  }, [settings.autoDriftCorrection]);
 
   useEffect(() => {
     const tracker = new FaceMeshTracker({
@@ -414,7 +419,12 @@ export default function App() {
         isOpen={isCalibrationOpen}
         tracker={trackerRef.current}
         settings={settings}
-        onClose={() => setIsCalibrationOpen(false)}
+        onClose={() => {
+          setIsCalibrationOpen(false);
+          // A fresh set-up supersedes anything drift correction had accumulated
+          // against the previous mapping.
+          driftGuard.reset();
+        }}
         onFinished={() => undefined}
       />
 
@@ -425,6 +435,9 @@ export default function App() {
         sensitivityY={settings.sensitivityY}
         onClose={result => {
           setIsRecentreOpen(false);
+          // A manual re-centre recomputes the whole offset, so whatever the
+          // guard had accumulated toward the previous one no longer applies.
+          driftGuard.reset();
           if (result) {
             showToast(
               result.moved < 8
