@@ -1264,6 +1264,75 @@ claim is capped at 50 ms. With that, a single leaked bad frame moves the reading
 from 44.0 cm to 45.9 cm instead of to 50.2 cm, while a genuine lean from 44 cm to
 35 cm still arrives within a second.
 
+## The measurement never reached the activities
+
+A fair question after a fortnight of work on calibration: does any of it carry
+over to the games, or has the tracking been improved in one place and left alone
+everywhere else?
+
+It carries over completely. There is one tracking path — the landmarker feeds
+`faceMeshTracker`, which maps through the calibration model and publishes a
+single gaze state on `gazeBus`, and every activity reads that. The accuracy
+figure is not measured some other way either: the check stage records
+`gaze.screenX/screenY`, the exact live marker an activity uses. So the figure on
+the result screen is a genuine statement about the live experience, not a
+best-case number from a different code path.
+
+What did *not* carry over was the **answer**.
+
+Every activity carried a hand-picked assist margin — 55 px around the large
+targets, 35 for medium, 18 for small, 28 in join-the-dots, 20 for the letter
+tiles. Those were guesses at how far the estimate lands from where someone is
+actually looking, written before there was any way to measure it. And
+Find-and-hold hard-coded `useState(1)`: medium, always, whatever the set-up had
+just measured.
+
+So a client measured at 103 px of error was dropped into targets whose total
+reach was 79 px. The marker sat outside the target the whole time they were
+looking straight at it, nothing fired, and nothing on screen said why — on a
+result screen that had, moments earlier, correctly listed medium as "not yet".
+The tool knew and did not act on what it knew.
+
+### The assist is the instrument's error, not a difficulty setting
+
+That is the honest definition of what an assist is for: it compensates for the
+tracker, not for the person. Sized that way, a hit means the client looked at the
+target and a miss means they did not, which is the only version a clinician can
+read anything into.
+
+The obvious implementation is wrong, though, and worth recording. Handing every
+size the full measured error is the direct reading of "forgive what the
+instrument gets wrong" — and at 103 px it puts the three sizes within 20% of each
+other. Large, medium and small stop differing, and the small setting, which
+exists to be demanding, is no longer demanding.
+
+So the assist is capped at the target's own radius. Each size gets as much
+compensation as it can afford while a hit still requires the gaze inside twice
+its own radius, and the sizes stay ordered:
+
+| | radius | assist at 103 px error | total reach |
+|---|---|---|---|
+| large | 62 | 62 | 124 px |
+| medium | 44 | 44 | 88 px |
+| small | 30 | 30 | 60 px |
+
+Letter tiles get a tighter cap still — half a tile — because they sit shoulder to
+shoulder, and a margin wider than the gap between two tiles would let a gaze that
+landed on S select D. A wrong letter is worse for a speller than a missed dwell.
+
+### And the default is a size the measurement supports
+
+Comfort is judged by the same 0.6 fraction the result screen uses, so the
+activity and the report cannot disagree about what is playable. At 103 px of
+error nothing is comfortable, so it starts on large and says so; at 40 px it
+starts on medium; at 12 px, on small. A size beyond what the set-up supports is
+still offered — a client may want to try, and a clinician may want to watch them
+try — but it is marked, and choosing it explains that the marker is landing
+further away than the target is wide.
+
+Driven end to end in a browser: an uncalibrated session starts on medium, and one
+that has just calibrated at 0.0° starts on small.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
