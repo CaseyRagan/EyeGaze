@@ -1103,5 +1103,70 @@ setEyelidCueEnabled(false);
   }
 }
 
+/**
+ * A blink must not move the client backwards.
+ *
+ * Viewing distance is estimated from the apparent size of the iris, so it is
+ * inversely proportional to the fitted iris radius — and the upper lid coming
+ * down shrinks that radius. On a real face a blink took the reading from 44 cm
+ * to 60 cm and back, fifteen times a minute, while the person sat still. The
+ * mapping never depended on it (depth compensation uses the separation between
+ * the eye corners, which a lid does not move) but every figure reported in
+ * degrees is scaled by it, as is the sit-here guidance and the head outline.
+ *
+ * Two behaviours protect it and both are asserted here: a withheld reading is
+ * held rather than treated as unknown, and what is accepted is smoothed.
+ */
+{
+  console.log('\n--- A blink must not move the client backwards ---');
+
+  viewingGeometry.updateSettings({ useMeasuredDistance: true, distanceScale: 1 });
+  viewingGeometry.clearMeasuredDistance();
+
+  // Settle at 44 cm over a second of frames.
+  let t = 0;
+  for (let i = 0; i < 40; i++, t += 33) viewingGeometry.setMeasuredDistanceCm(44, 0.8, t);
+  const settled = viewingGeometry.getRawMeasuredDistanceCm() ?? NaN;
+  const arrived = Math.abs(settled - 44) < 0.5;
+  if (!arrived) failures++;
+  console.log(
+    `${arrived ? 'ok  ' : 'FAIL'}  it settles where the client is           ${settled.toFixed(1)} cm`
+  );
+
+  // A 150 ms blink: the tracker withholds the reading entirely.
+  for (let i = 0; i < 5; i++, t += 33) viewingGeometry.setMeasuredDistanceCm(null, 0, t);
+  const throughBlink = viewingGeometry.getRawMeasuredDistanceCm() ?? NaN;
+  const heldThrough = Math.abs(throughBlink - 44) < 0.5;
+  if (!heldThrough) failures++;
+  console.log(
+    `${heldThrough ? 'ok  ' : 'FAIL'}  and holds through a blink                ${throughBlink.toFixed(1)} cm`
+  );
+
+  // Even if a contaminated frame leaks past the gate, one frame must not move
+  // the reported distance far — this is what the smoothing is for.
+  viewingGeometry.setMeasuredDistanceCm(60, 0.3, t);
+  t += 33;
+  const afterLeak = viewingGeometry.getRawMeasuredDistanceCm() ?? NaN;
+  const leakDamped = afterLeak - 44 < 2;
+  if (!leakDamped) failures++;
+  console.log(
+    `${leakDamped ? 'ok  ' : 'FAIL'}  and one bad frame barely moves it        ` +
+      `${afterLeak.toFixed(1)} cm (a raw reading would have jumped to 60.0)`
+  );
+
+  // But genuinely leaning in still has to arrive, and promptly.
+  for (let i = 0; i < 30; i++, t += 33) viewingGeometry.setMeasuredDistanceCm(35, 0.8, t);
+  const afterLean = viewingGeometry.getRawMeasuredDistanceCm() ?? NaN;
+  const followed = Math.abs(afterLean - 35) < 1;
+  if (!followed) failures++;
+  console.log(
+    `${followed ? 'ok  ' : 'FAIL'}  while a real move still arrives          ` +
+      `${afterLean.toFixed(1)} cm after a second of leaning in`
+  );
+
+  viewingGeometry.clearMeasuredDistance();
+  viewingGeometry.updateSettings({ useMeasuredDistance: false });
+}
+
 console.log(failures === 0 ? '\nAll calibration checks passed.' : `\n${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

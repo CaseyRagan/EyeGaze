@@ -1207,6 +1207,63 @@ So the next thing to attack is head pitch drift between the grid and the check,
 which was previously hidden underneath a regulariser that was quietly discarding
 the vertical axis.
 
+## A blink was moving the client 16 cm backwards
+
+Two screenshots of the set-up screen, taken seconds apart with the head held
+still: eyes open, 44 cm and "that is the spot"; eyes closed, **60 cm** and "come
+a little closer", with the head outline visibly shrunk.
+
+Viewing distance is estimated from the apparent size of the iris against its
+known real diameter, so it is inversely proportional to the fitted iris radius —
+and the upper lid coming down over the iris shrinks that radius. A 27% smaller
+radius reads as 36% further away. At fifteen blinks a minute, that is a client
+apparently leaping half a foot backwards and returning, over and over, while
+sitting perfectly still.
+
+**The mapping never depended on it.** Depth compensation uses the separation
+between the two eye corners, which is a horizontal measurement between landmarks
+a lid does not move, and it was written that way deliberately because the
+absolute distance depends on assumed camera optics. So the gaze estimate was
+never being pulled about by this.
+
+What it did corrupt is everything reported *about* the session:
+
+- every figure in degrees, since `pixelsToDegrees` scales by it — which is why
+  one recorded session stored 42.9 cm and the next, a minute later, 71.4 cm, and
+  why two runs of the same set-up were not comparable in degrees even though
+  their pixel errors were within 10% of each other
+- the sit-here guidance, which told a stationary person to move
+- the head outline in that card, whose size comes from the distance directly
+- the half-angle warning, and the geometry block in every session recording
+
+### Withheld, then held, then smoothed
+
+The measurement is now **withheld** while either lid is below 0.65 openness —
+the same threshold used for the eyelid gaze cue, for the same reason: both read
+a part of the eye the lid covers first. There is a second, lid-independent
+estimate from the face model, but substituting it would swap one jump for
+another wherever the two disagree, and on the machine this was found on they
+disagree by 1.5x.
+
+A withheld reading is then **held** rather than treated as unknown. Dropping
+back to the assumed default on every blink is a worse lie than a slightly stale
+value: somebody who has not moved has not stopped being 44 cm away because they
+blinked.
+
+And what is accepted is **smoothed**, with a 400 ms time constant, because a
+person's distance from their screen changes over seconds and this estimate was
+changing every frame.
+
+One detail worth recording, because the first version got it backwards. The
+filter originally weighted each reading by the time since the last accepted one,
+which is correct for an evenly sampled signal and wrong here: after a blink the
+gap is 200 ms, so the very first frame back — the one most likely to still carry
+a half-open lid — was handed 40% of the weight, more than any clean frame ever
+gets. A gap means *less* evidence, not more, so the elapsed time each reading may
+claim is capped at 50 ms. With that, a single leaked bad frame moves the reading
+from 44.0 cm to 45.9 cm instead of to 50.2 cm, while a genuine lean from 44 cm to
+35 cm still arrives within a second.
+
 ## What the numbers mean
 
 - **Accuracy** — mean distance between the estimate and the true target, at five
