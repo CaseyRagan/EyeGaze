@@ -66,9 +66,23 @@ const DEFAULTS: ViewingGeometrySettings = {
 /** Below this agreement between the two estimates, the measurement is not used. */
 const MIN_DISTANCE_AGREEMENT = 0.5;
 
+/**
+ * How quickly the held distance follows a real change, in milliseconds. Short
+ * enough that leaning in is reflected almost at once, long enough that the
+ * frame-to-frame wander in the estimate stops reaching the reported figures.
+ */
+const DISTANCE_TIME_CONSTANT_MS = 400;
+
+/**
+ * The most weight any single reading may carry, expressed as the longest gap it
+ * is allowed to claim credit for. About a frame and a half at 30 Hz.
+ */
+const MAX_DISTANCE_STEP_MS = 50;
+
 class ViewingGeometry {
   private settings: ViewingGeometrySettings = { ...DEFAULTS };
   private measuredDistanceCm: number | null = null;
+  private lastDistanceAt: number | null = null;
   private measurementAgreement = 0;
 
   constructor() {
@@ -105,12 +119,58 @@ class ViewingGeometry {
     this.save();
   }
 
-  /** Called by the tracker with the live distance estimate and its confidence. */
-  public setMeasuredDistanceCm(distanceCm: number | null, agreement = 0) {
+  /**
+   * Called by the tracker with the live distance estimate and its confidence.
+   *
+   * Two things happen here that did not before, and both come from the same
+   * observation: a person's distance from their screen changes over seconds,
+   * and this estimate was changing every frame.
+   *
+   * A withheld reading is *held*, not cleared. The tracker stops offering a
+   * distance whenever an eye is too closed to measure the iris, which is the
+   * honest thing for it to do and happens fifteen times a minute. Treating that
+   * as "distance unknown" would drop the reading back to the assumed default on
+   * every blink, which is a worse lie than the stale value: somebody who has not
+   * moved has not stopped being 44 cm away because they blinked.
+   *
+   * And what is accepted is smoothed. Even with the eyes open the frame-to-frame
+   * estimate wanders, and every figure reported in degrees is scaled by it — one
+   * recorded session stored 42.9 cm and the next, a minute later, 71.4 cm, which
+   * made two runs of the same set-up incomparable for reasons that had nothing
+   * to do with the tracking. The time constant is short enough that genuinely
+   * leaning in shows up within about half a second.
+   */
+  public setMeasuredDistanceCm(distanceCm: number | null, agreement = 0, now = Date.now()) {
     const valid =
       distanceCm !== null && Number.isFinite(distanceCm) && distanceCm > 15 && distanceCm < 200;
-    this.measuredDistanceCm = valid ? distanceCm : null;
-    this.measurementAgreement = valid ? agreement : 0;
+    if (!valid) return;
+
+    // Capped, because a gap in the readings means *less* evidence, not more.
+    // Without this, the first frame after a blink arrives 200 ms after the last
+    // accepted one and is handed 40% of the weight — so the one frame most
+    // likely to still be contaminated by a half-open lid would get more
+    // authority than any clean frame, which is precisely backwards.
+    const sinceLast = this.lastDistanceAt === null ? MAX_DISTANCE_STEP_MS : now - this.lastDistanceAt;
+    const elapsedMs = Math.min(Math.max(0, sinceLast), MAX_DISTANCE_STEP_MS);
+    this.lastDistanceAt = now;
+
+    if (this.measuredDistanceCm === null) {
+      this.measuredDistanceCm = distanceCm;
+      this.measurementAgreement = agreement;
+      return;
+    }
+
+    // Frame-rate independent, so the response feels the same on a slow machine.
+    const weight = 1 - Math.exp(-elapsedMs / DISTANCE_TIME_CONSTANT_MS);
+    this.measuredDistanceCm += (distanceCm - this.measuredDistanceCm) * weight;
+    this.measurementAgreement += (agreement - this.measurementAgreement) * weight;
+  }
+
+  /** Forgets the held distance, for a genuine restart rather than a blink. */
+  public clearMeasuredDistance() {
+    this.measuredDistanceCm = null;
+    this.measurementAgreement = 0;
+    this.lastDistanceAt = null;
   }
 
   /** The raw measurement, before the user's correction. */

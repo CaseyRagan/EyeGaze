@@ -353,81 +353,6 @@ export function extractGazeFeatures(
     }
   }
 
-  // --- Distance -------------------------------------------------------------
-  // Two independent estimates, neither of which is trustworthy alone.
-  //
-  // The face model's translation rests on camera intrinsics MediaPipe assumes
-  // rather than measures. The iris measurement rests on the iris being very
-  // nearly the same physical size in every adult — which is true — but divides
-  // by an assumed field of view, which varies a lot between webcams.
-  //
-  // So they are cross-checked. Agreement is good evidence both are close;
-  // disagreement means the camera is not what one of them assumed, and the
-  // result is reported as unreliable rather than averaged into a confident
-  // wrong answer. Every accuracy figure in degrees scales with this number, so
-  // quietly picking one is how a tool ends up reporting nine degrees of error
-  // for a two degree problem.
-  const irisRadii = [eyeA?.irisRadius, eyeB?.irisRadius].filter(
-    (r): r is number => typeof r === 'number' && r > 1e-4
-  );
-  const irisDiameterNorm =
-    irisRadii.length > 0 ? (irisRadii.reduce((a, b) => a + b, 0) / irisRadii.length) * 2 : 0;
-
-  const plausible = (v: number | null | undefined): number | null =>
-    typeof v === 'number' && Number.isFinite(v) && v >= 15 && v <= 200 ? v : null;
-
-  const modelDistance = plausible(decomposed?.distanceCm);
-
-  let irisDistance: number | null = null;
-  if (irisDiameterNorm > 1e-4) {
-    const focalPx = 0.5 / Math.tan((ASSUMED_HFOV_DEG * Math.PI) / 360);
-    irisDistance = plausible((focalPx * IRIS_DIAMETER_MM) / (irisDiameterNorm * 10));
-  }
-
-  let distanceCm: number | null;
-  let distanceAgreement: number;
-
-  if (modelDistance !== null && irisDistance !== null) {
-    const ratio = modelDistance / irisDistance;
-    // 1 is perfect agreement; this falls to 0 by the time they differ by 2x.
-    distanceAgreement = Math.max(0, 1 - Math.abs(Math.log(ratio)) / Math.log(2));
-    distanceCm = distanceAgreement > 0.5 ? (modelDistance + irisDistance) / 2 : irisDistance;
-  } else if (irisDistance !== null) {
-    distanceCm = irisDistance;
-    distanceAgreement = 0.4;
-  } else if (modelDistance !== null) {
-    distanceCm = modelDistance;
-    distanceAgreement = 0.4;
-  } else {
-    distanceCm = null;
-    distanceAgreement = 0;
-  }
-
-  const faceCentre: Vec2 = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
-
-  const diagnostics: FeatureDiagnostics = {
-    matrixLayout: !transformMatrix || transformMatrix.length < 16
-      ? 'absent'
-      : detectMatrixLayout(transformMatrix) ?? 'undetectable',
-    modelDistanceCm: modelDistance,
-    irisDistanceCm: irisDistance,
-    irisDiameterNorm,
-    landmarkCount: landmarks.length,
-    usedFallbackHeadPose: decomposed === null,
-  };
-
-  const headPose: HeadPose = {
-    yaw,
-    pitch,
-    roll,
-    translateX: faceCentre.x - 0.5,
-    // Half of one image *width*, because that is the unit y is now in.
-    translateY: faceCentre.y - 0.5 / aspect,
-    distanceCm,
-    distanceAgreement,
-    interocularSpan: span,
-  };
-
   // --- Eye openness and blink ----------------------------------------------
   const blinkLeftScore = blendshapes['eyeBlinkLeft'] ?? 0;
   const blinkRightScore = blendshapes['eyeBlinkRight'] ?? 0;
@@ -462,6 +387,113 @@ export function extractGazeFeatures(
    * lid moves, well before the lid is closed enough for anything else to notice.
    */
   const LID_CUE_TRUST_OPENNESS = 0.65;
+
+  /**
+   * How open both eyes have to be before the iris is worth measuring the size
+   * of. The same threshold as the gaze cue, for the same reason: both read a
+   * part of the eye that the lid covers first.
+   */
+  const IRIS_MEASURABLE_OPENNESS = 0.65;
+
+  // --- Distance -------------------------------------------------------------
+  // Two independent estimates, neither of which is trustworthy alone.
+  //
+  // The face model's translation rests on camera intrinsics MediaPipe assumes
+  // rather than measures. The iris measurement rests on the iris being very
+  // nearly the same physical size in every adult — which is true — but divides
+  // by an assumed field of view, which varies a lot between webcams.
+  //
+  // So they are cross-checked. Agreement is good evidence both are close;
+  // disagreement means the camera is not what one of them assumed, and the
+  // result is reported as unreliable rather than averaged into a confident
+  // wrong answer. Every accuracy figure in degrees scales with this number, so
+  // quietly picking one is how a tool ends up reporting nine degrees of error
+  // for a two degree problem.
+  const irisRadii = [eyeA?.irisRadius, eyeB?.irisRadius].filter(
+    (r): r is number => typeof r === 'number' && r > 1e-4
+  );
+  const irisDiameterNorm =
+    irisRadii.length > 0 ? (irisRadii.reduce((a, b) => a + b, 0) / irisRadii.length) * 2 : 0;
+
+  const plausible = (v: number | null | undefined): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 15 && v <= 200 ? v : null;
+
+  const modelDistance = plausible(decomposed?.distanceCm);
+
+  /*
+   * A blink is not a change of distance.
+   *
+   * This estimate is the apparent size of the iris against its known real
+   * diameter, so it is inversely proportional to the fitted iris radius — and
+   * the upper lid coming down over the iris shrinks that radius. Measured on a
+   * real face, a blink took the reading from 44 cm to 60 cm and back, which is
+   * the client apparently leaping half a foot backwards fifteen times a minute
+   * while sitting perfectly still.
+   *
+   * Nothing about the mapping depends on it — depth compensation uses the
+   * separation between the eye corners, which a lid does not move — but every
+   * figure reported in degrees is scaled by it, along with the sit-here
+   * guidance and the head outline. One recorded session stored 42.9 cm and the
+   * next, a minute later, 71.4 cm; those are the same person not moving.
+   *
+   * So the measurement is withheld rather than corrected. There is a second,
+   * lid-independent estimate from the face model, but substituting it here
+   * would swap one jump for another wherever the two disagree — and they do,
+   * by 1.5x on the machine this was found on. The honest report while an eye is
+   * shut is that the distance is not currently measurable; holding the last
+   * good value is viewingGeometry's job.
+   */
+  const irisVisible = Math.min(openA, openB) > IRIS_MEASURABLE_OPENNESS;
+
+  let irisDistance: number | null = null;
+  if (irisVisible && irisDiameterNorm > 1e-4) {
+    const focalPx = 0.5 / Math.tan((ASSUMED_HFOV_DEG * Math.PI) / 360);
+    irisDistance = plausible((focalPx * IRIS_DIAMETER_MM) / (irisDiameterNorm * 10));
+  }
+
+  let distanceCm: number | null;
+  let distanceAgreement: number;
+
+  if (modelDistance !== null && irisDistance !== null) {
+    const ratio = modelDistance / irisDistance;
+    // 1 is perfect agreement; this falls to 0 by the time they differ by 2x.
+    distanceAgreement = Math.max(0, 1 - Math.abs(Math.log(ratio)) / Math.log(2));
+    distanceCm = distanceAgreement > 0.5 ? (modelDistance + irisDistance) / 2 : irisDistance;
+  } else if (irisDistance !== null) {
+    distanceCm = irisDistance;
+    distanceAgreement = 0.4;
+  } else if (modelDistance !== null && irisVisible) {
+    distanceCm = modelDistance;
+    distanceAgreement = 0.4;
+  } else {
+    distanceCm = null;
+    distanceAgreement = 0;
+  }
+
+  const faceCentre: Vec2 = { x: (leftEye.x + rightEye.x) / 2, y: (leftEye.y + rightEye.y) / 2 };
+
+  const diagnostics: FeatureDiagnostics = {
+    matrixLayout: !transformMatrix || transformMatrix.length < 16
+      ? 'absent'
+      : detectMatrixLayout(transformMatrix) ?? 'undetectable',
+    modelDistanceCm: modelDistance,
+    irisDistanceCm: irisDistance,
+    irisDiameterNorm,
+    landmarkCount: landmarks.length,
+    usedFallbackHeadPose: decomposed === null,
+  };
+
+  const headPose: HeadPose = {
+    yaw,
+    pitch,
+    roll,
+    translateX: faceCentre.x - 0.5,
+    // Half of one image *width*, because that is the unit y is now in.
+    translateY: faceCentre.y - 0.5 / aspect,
+    distanceCm,
+    distanceAgreement,
+    interocularSpan: span,
+  };
 
   // --- A second, independent vertical cue -----------------------------------
   /*

@@ -481,7 +481,7 @@ export class FaceMeshTracker {
     // Rolling frame rate over the last second, for the diagnostics readout.
     this.frameTimes.push(now);
     while (this.frameTimes.length > 0 && now - this.frameTimes[0] > 1000) this.frameTimes.shift();
-    viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm, headPose.distanceAgreement);
+    viewingGeometry.setMeasuredDistanceCm(headPose.distanceCm, headPose.distanceAgreement, now);
 
     // --- Blink bookkeeping ---------------------------------------------------
     const blinkingBoth = features.isBlinkingBoth;
